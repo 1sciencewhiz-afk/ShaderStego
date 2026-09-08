@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ShaderStego</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>ShaderStego</h1>
+      <p class="tagline">Hide encrypted text inside a procedurally generated shader image.</p>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-button active" data-target="encode-panel">Encoder</button>
+      <button class="tab-button" data-target="decode-panel">Decoder</button>
+    </nav>
+
+    <main>
+      <section id="encode-panel" class="tab-panel active">
+        <label for="encode-text">Text to hide</label>
+        <textarea id="encode-text" rows="8" placeholder="Enter the text or source code you want to hide..."></textarea>
+
+        <label for="encode-password">Passphrase</label>
+        <input id="encode-password" type="password" placeholder="Enter a strong passphrase" />
+
+        <button id="encode-button" class="primary-button">Generate Secure Image</button>
+        <p id="encode-status" class="status"></p>
+
+        <img id="encode-preview" class="preview hidden" alt="Generated carrier image" />
+        <a id="download-link" class="download-link hidden">Download PNG</a>
+      </section>
+
+      <section id="decode-panel" class="tab-panel">
+        <label for="decode-file">Upload PNG</label>
+        <input id="decode-file" type="file" accept="image/png" />
+
+        <label for="decode-password">Passphrase</label>
+        <input id="decode-password" type="password" placeholder="Enter the passphrase used to encrypt" />
+
+        <button id="decode-button" class="primary-button">Decrypt Image</button>
+        <p id="decode-status" class="status"></p>
+
+        <label for="decode-output">Extracted plaintext</label>
+        <textarea id="decode-output" rows="8" readonly placeholder="Decrypted text will appear here..."></textarea>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>All encryption, encoding, and decoding happens locally in your browser. Nothing is uploaded.</p>
+    </footer>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

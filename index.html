@@ -16,6 +16,8 @@
     <nav class="tabs">
       <button class="tab-button active" data-target="encode-panel">Encoder</button>
       <button class="tab-button" data-target="decode-panel">Decoder</button>
+      <button class="tab-button" data-target="adaptive-encode-panel">Adaptive Encoder</button>
+      <button class="tab-button" data-target="adaptive-decode-panel">Adaptive Decoder</button>
     </nav>
 
     <main>
@@ -45,6 +47,71 @@
 
         <label for="decode-output">Extracted plaintext</label>
         <textarea id="decode-output" rows="8" readonly placeholder="Decrypted text will appear here..."></textarea>
+      </section>
+
+      <section id="adaptive-encode-panel" class="tab-panel">
+        <p class="section-hint">
+          Hides data only inside high-complexity (edge/texture-rich) regions of a carrier
+          image, using Hamming matrix coding to flip far fewer bits than plain LSB.
+        </p>
+
+        <label for="adaptive-carrier-file">Carrier image (PNG, upload)</label>
+        <input id="adaptive-carrier-file" type="file" accept="image/png" />
+
+        <div class="inline-row">
+          <span class="or-divider">or</span>
+          <button id="adaptive-generate-button" class="secondary-button">Generate procedural carrier</button>
+        </div>
+
+        <canvas id="adaptive-carrier-preview" class="preview hidden"></canvas>
+
+        <label for="adaptive-block-size">Block size (px)</label>
+        <select id="adaptive-block-size">
+          <option value="4">4 x 4 (finer mask, slower)</option>
+          <option value="8" selected>8 x 8 (recommended)</option>
+          <option value="16">16 x 16 (coarser mask, faster)</option>
+        </select>
+
+        <label for="adaptive-threshold">
+          Complexity threshold: top <span id="adaptive-threshold-value">50</span>% of blocks
+        </label>
+        <input id="adaptive-threshold" type="range" min="0" max="95" value="50" step="1" />
+
+        <div id="adaptive-capacity-meter" class="capacity-meter hidden">
+          <div><strong>Selected blocks:</strong> <span id="adaptive-selected-blocks">-</span></div>
+          <div><strong>Adaptive capacity:</strong> <span id="adaptive-capacity-bits">-</span></div>
+          <div><strong>Sequential LSB capacity (reference):</strong> <span id="adaptive-sequential-bits">-</span></div>
+        </div>
+
+        <canvas id="adaptive-visualizer" class="preview hidden"></canvas>
+
+        <label for="adaptive-encode-text">Text to hide</label>
+        <textarea id="adaptive-encode-text" rows="6" placeholder="Enter the text or source code you want to hide..."></textarea>
+
+        <label for="adaptive-encode-password">Passphrase</label>
+        <input id="adaptive-encode-password" type="password" placeholder="Enter a strong passphrase" />
+
+        <button id="adaptive-encode-button" class="primary-button">Hide Data Adaptively</button>
+        <p id="adaptive-encode-status" class="status"></p>
+
+        <img id="adaptive-encode-preview" class="preview hidden" alt="Generated stego image" />
+        <a id="adaptive-download-link" class="download-link hidden">Download PNG</a>
+      </section>
+
+      <section id="adaptive-decode-panel" class="tab-panel">
+        <label for="adaptive-decode-file">Upload PNG</label>
+        <input id="adaptive-decode-file" type="file" accept="image/png" />
+
+        <label for="adaptive-decode-password">Passphrase</label>
+        <input id="adaptive-decode-password" type="password" placeholder="Enter the passphrase used to encrypt" />
+
+        <button id="adaptive-decode-button" class="primary-button">Decrypt Image</button>
+        <p id="adaptive-decode-status" class="status"></p>
+
+        <canvas id="adaptive-decode-visualizer" class="preview hidden"></canvas>
+
+        <label for="adaptive-decode-output">Extracted plaintext</label>
+        <textarea id="adaptive-decode-output" rows="8" readonly placeholder="Decrypted text will appear here..."></textarea>
       </section>
     </main>
 

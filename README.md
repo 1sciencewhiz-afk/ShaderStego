@@ -26,15 +26,50 @@ Everything happens locally in the browser — nothing is ever uploaded.
    your passphrase. Wrong passphrase or corrupted data fails the AES-GCM
    authentication check and is reported as an error.
 
+## Adaptive mode (V2)
+
+The **Adaptive Encoder**/**Adaptive Decoder** tabs implement a second,
+detectability-conscious scheme on top of the same AES-GCM crypto:
+
+- **Complexity masking** — the carrier (an uploaded photo/art PNG, or a
+  generated procedural shader image) is scored in `blockSize x blockSize`
+  blocks using a 3x3 Sobel gradient operator over luminance. Only blocks
+  whose score is at or above a user-chosen percentile threshold ("top N% of
+  blocks") are eligible to carry data, biasing hidden bits toward
+  high-texture regions where LSB changes are least statistically
+  detectable. Scoring always reads the top 7 bits of each channel, so it's
+  unaffected by any LSB embedding already present — the same code scores a
+  clean carrier or a stego image identically.
+- **Hamming matrix coding** — instead of plain sequential LSB, ciphertext
+  bits are embedded 3-at-a-time into groups of 7 carrier bits using a
+  (7,4) Hamming-code syndrome trick (a lightweight relative of
+  Syndrome-Trellis Codes): for any 7 bits, at most one needs to flip to
+  encode any 3-bit message. This cuts the fraction of visited bits that
+  actually change from ~50% (plain LSB) to ~1/7 in the worst case.
+- **Header & mask transport** — a small fixed header (`'STEGV2'` magic,
+  salt, IV, block size, mask dimensions, ciphertext length) plus the packed
+  1-bit-per-block embed mask are written with plain sequential LSB into the
+  image's leading rows; those rows are always excluded from the adaptive
+  mask so the two regions never collide. The mask is transmitted rather
+  than re-derived, so decoding never depends on both sides computing
+  identical floating-point Sobel scores.
+- **UI** — the Complexity Visualizer overlays selected (green), unselected
+  (red), and header-reserved (gray) blocks on the carrier; the Capacity
+  Meter compares adaptive capacity at the current threshold against plain
+  sequential-LSB capacity.
+
 ## Project layout
 
 ```
-index.html            Encoder / Decoder UI
-css/style.css          Styling
-js/crypto.js           AES-GCM + PBKDF2 (Web Crypto API)
-js/steganography.js    Packet framing + LSB embed/extract
-js/shaderRenderer.js   WebGL2 procedural shader carrier image
-js/main.js             UI wiring
+index.html              Encoder / Decoder / Adaptive Encoder / Adaptive Decoder UI
+css/style.css           Styling
+js/crypto.js            AES-GCM + PBKDF2 (Web Crypto API)
+js/steganography.js     V1 packet framing + sequential LSB embed/extract
+js/steganographyV2.js   V2 header framing + adaptive embed/extract orchestration
+js/complexity.js        Sobel-based block complexity scoring + embed mask
+js/hamming.js           Hamming(7,3) matrix coding (embed/extract)
+js/shaderRenderer.js    WebGL2 procedural shader carrier image
+js/main.js              UI wiring
 ```
 
 ## Running locally

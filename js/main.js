@@ -4,6 +4,18 @@ import { renderShaderCanvas } from './shaderRenderer.js';
 import { renderMaskOverlay } from './complexity.js';
 import { scoreCarrier, buildAnalysis, embedAdaptive, extractAdaptive } from './steganographyV2.js';
 
+// Mimics the filename Google Gemini gives its generated-image downloads
+// (e.g. "Gemini_Generated_Image_a1b2c3.png"), so the stego PNG blends in
+// with ordinary AI-generated image downloads rather than standing out.
+function generateGeminiFilename() {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let suffix = '';
+  for (let i = 0; i < 6; i++) {
+    suffix += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return `Gemini_Generated_Image_${suffix}.png`;
+}
+
 // --- Tab switching ---------------------------------------------------------
 
 const tabButtons = document.querySelectorAll('.tab-button');
@@ -69,7 +81,7 @@ encodeButton.addEventListener('click', async () => {
     canvas.toBlob((blob) => {
       const url = URL.createObjectURL(blob);
       downloadLink.href = url;
-      downloadLink.download = 'shaderstego.png';
+      downloadLink.download = generateGeminiFilename();
       downloadLink.classList.remove('hidden');
     }, 'image/png');
 
@@ -297,7 +309,7 @@ adaptiveEncodeButton.addEventListener('click', async () => {
     adaptiveCarrierPreview.toBlob((blob) => {
       const url = URL.createObjectURL(blob);
       adaptiveDownloadLink.href = url;
-      adaptiveDownloadLink.download = 'shaderstego-adaptive.png';
+      adaptiveDownloadLink.download = generateGeminiFilename();
       adaptiveDownloadLink.classList.remove('hidden');
     }, 'image/png');
 

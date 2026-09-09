@@ -14,14 +14,71 @@
     </header>
 
     <nav class="tabs">
-      <button class="tab-button active" data-target="encode-panel">Encoder</button>
+      <button class="tab-button active" data-target="help-panel">How to Use</button>
+      <button class="tab-button" data-target="encode-panel">Encoder</button>
       <button class="tab-button" data-target="decode-panel">Decoder</button>
       <button class="tab-button" data-target="adaptive-encode-panel">Adaptive Encoder</button>
       <button class="tab-button" data-target="adaptive-decode-panel">Adaptive Decoder</button>
     </nav>
 
     <main>
-      <section id="encode-panel" class="tab-panel active">
+      <section id="help-panel" class="tab-panel active help-panel">
+        <p class="section-hint">
+          ShaderStego hides an encrypted message or file inside the pixels of a
+          generated image. Nobody looking at the PNG can tell it holds anything —
+          only someone with the passphrase can get it back out.
+        </p>
+
+        <h2>Encoder &amp; Decoder (standard)</h2>
+        <p>The simplest way to hide something. Best for most uses.</p>
+        <ol>
+          <li>Open the <strong>Encoder</strong> tab. Type the text you want to hide, or attach a file
+            instead (drag it onto the drop zone, or click it to browse — any file type works: PDF,
+            ZIP, MP3, EXE, etc.).</li>
+          <li>Enter a passphrase. Anyone extracting the data will need this exact passphrase.</li>
+          <li>Click <strong>Generate Secure Image</strong>. A carrier image is generated, sized to fit
+            your payload, with the encrypted data hidden in it.</li>
+          <li>Click <strong>Download PNG</strong> and save the image. Share it however you like — the
+            hidden data travels with the file.</li>
+          <li>To get the data back out: open the <strong>Decoder</strong> tab, upload that PNG, enter
+            the same passphrase, and click <strong>Decrypt Image</strong>. Text appears in the box
+            below; a file offers a <strong>Download Extracted File</strong> button.</li>
+        </ol>
+
+        <h2>Adaptive Encoder &amp; Decoder</h2>
+        <p>
+          A more advanced mode that hides data inside an existing photo or image instead of a
+          generated one, concentrating changes in busy/textured areas rather than smooth ones
+          (harder to detect) and stretching capacity further.
+        </p>
+        <ol>
+          <li>Open the <strong>Adaptive Encoder</strong> tab. Upload a carrier image (a real photo
+            works well) or click <strong>Generate procedural carrier</strong> for one.</li>
+          <li>Leave <strong>Variance window</strong> and the two threshold sliders at their defaults
+            unless you want to tune capacity — the Capacity Meter updates live and warns if your
+            payload won't fit at the current settings.</li>
+          <li>Enter your text or attach a file, plus a passphrase, then click
+            <strong>Hide Data Adaptively</strong> and download the result, same as the standard
+            Encoder.</li>
+          <li>Decode it in the <strong>Adaptive Decoder</strong> tab the same way as the standard
+            Decoder: upload the PNG, enter the passphrase, click <strong>Decrypt Image</strong>.</li>
+        </ol>
+
+        <h2>Good to know</h2>
+        <ul>
+          <li><strong>Always download as PNG.</strong> Never re-save, re-compress, resize, or share
+            the image through an app that re-encodes it (some chat apps do this automatically) — any
+            of that destroys the hidden bits.</li>
+          <li><strong>The passphrase must match exactly.</strong> There's no password reset — if you
+            forget it, the data is unrecoverable.</li>
+          <li>Everything runs locally in your browser. Nothing is ever uploaded anywhere.</li>
+          <li>Images made with an older version of this app, or with the wrong mode's decoder, won't
+            decode — the Encoder/Decoder and Adaptive Encoder/Decoder use different, incompatible
+            formats, so use the matching pair.</li>
+        </ul>
+      </section>
+
+      <section id="encode-panel" class="tab-panel">
         <label for="encode-text">Text to hide</label>
         <textarea id="encode-text" rows="8" placeholder="Enter the text or source code you want to hide..."></textarea>
 

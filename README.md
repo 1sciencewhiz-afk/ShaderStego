@@ -104,7 +104,7 @@ while keeping changes concentrated where they're least visible.
 ## Project layout
 
 ```
-index.html              Encoder / Decoder / Adaptive Encoder / Adaptive Decoder UI
+index.html              How to Use / Encoder / Decoder / Adaptive Encoder / Adaptive Decoder UI
 css/style.css           Styling
 js/crypto.js            AES-GCM + PBKDF2 + gzip (Web Crypto / Compression Streams API)
 js/filePacking.js       Metadata header packing/unpacking (name + MIME type)

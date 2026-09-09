@@ -82,6 +82,37 @@ body {
   display: flex;
 }
 
+.help-panel h2 {
+  margin: 0.5rem 0 0;
+  font-size: 1.05rem;
+  color: var(--text);
+}
+
+.help-panel h2:first-of-type {
+  margin-top: 0;
+}
+
+.help-panel p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.help-panel ol,
+.help-panel ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.help-panel li strong {
+  color: var(--text);
+}
+
 label {
   font-size: 0.875rem;
   color: var(--muted);

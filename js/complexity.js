@@ -1,39 +1,39 @@
-// Adaptive complexity masking: scores image blocks by local gradient energy
-// (a 3x3 Sobel operator over luminance) and selects the highest-complexity
-// blocks as eligible embedding regions, to bias hidden data away from flat,
-// low-entropy areas where LSB changes are more statistically detectable.
+// Variance cost map: scores each pixel by local luminance variance and
+// allocates a per-pixel bit budget — 0 bits in smooth regions, 1 bit in
+// moderate-texture regions, 2 bits (the two lowest bits of the blue
+// channel) in high-variance/textured regions — so payload capacity
+// concentrates in areas where LSB changes are least statistically
+// detectable, while smooth regions (the areas most vulnerable to
+// steganalysis) are left completely untouched.
 //
-// Complexity is always computed from the top 7 bits of each channel
-// (value & 0xFE). LSB embedding never touches those bits, so the encoder
-// (scoring the clean carrier) and the decoder (scoring the stego image)
-// always compute byte-identical scores without needing to transmit them.
+// Only the blue channel is ever modified, and variance is always computed
+// from data the embedding step never touches: full-precision red/green,
+// and the top 6 bits of blue (`& 0xFC`), since a "2 bits" pixel can have
+// blue's bottom two bits rewritten. That makes the cost map provably
+// identical whether computed on a clean carrier or a stego image, so it
+// never needs to be transmitted — only the two percentile thresholds that
+// parameterize it (a couple of bytes) go in the header.
 
-export const DEFAULT_BLOCK_SIZE = 8;
-
-function luminance(r, g, b) {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+function luminance(r, g, bMasked) {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * bMasked;
 }
 
 /**
- * Build a luminance map from imageData using only the top 7 bits of each
- * channel, so the map is unaffected by any LSB steganography already
- * present in the pixels.
+ * Build a luminance map using full-precision R/G and blue with its bottom
+ * two bits cleared, so the map is unaffected by any prior 2-bit embedding.
  */
 function buildLuminanceMap(imageData) {
   const { data, width, height } = imageData;
   const lum = new Float32Array(width * height);
   for (let i = 0, p = 0; p < width * height; i += 4, p++) {
-    const r = data[i] & 0xfe;
-    const g = data[i + 1] & 0xfe;
-    const b = data[i + 2] & 0xfe;
-    lum[p] = luminance(r, g, b);
+    lum[p] = luminance(data[i], data[i + 1], data[i + 2] & 0xfc);
   }
   return lum;
 }
 
-/** Per-pixel Sobel gradient magnitude over the luminance map, edge-clamped. */
-function computeSobelMagnitude(lum, width, height) {
-  const mag = new Float32Array(width * height);
+/** Per-pixel local variance of the luminance map over a (2r+1)x(2r+1) window, edge-clamped. */
+function computeLocalVariance(lum, width, height, radius) {
+  const variance = new Float32Array(width * height);
   const at = (x, y) => {
     const cx = Math.min(width - 1, Math.max(0, x));
     const cy = Math.min(height - 1, Math.max(0, y));
@@ -42,151 +42,119 @@ function computeSobelMagnitude(lum, width, height) {
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      const gx =
-        -at(x - 1, y - 1) + at(x + 1, y - 1) +
-        -2 * at(x - 1, y) + 2 * at(x + 1, y) +
-        -at(x - 1, y + 1) + at(x + 1, y + 1);
-      const gy =
-        -at(x - 1, y - 1) - 2 * at(x, y - 1) - at(x + 1, y - 1) +
-        at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1);
-      mag[y * width + x] = Math.sqrt(gx * gx + gy * gy);
-    }
-  }
-  return mag;
-}
-
-/**
- * Number of leading full block-rows (spanning the whole width) that must be
- * reserved for the plain, sequentially-embedded header. Computed purely
- * from image geometry and the header's byte size, so both encoder and
- * decoder derive the same reservation before any complexity scoring.
- */
-export function computeReservedBlockRows(width, height, blockSize, headerTotalBytes) {
-  const slotsPerBlockRow = width * blockSize * 3; // 3 usable (R/G/B) channels per pixel
-  const slotsNeeded = headerTotalBytes * 8;
-  const reservedBlockRows = Math.ceil(slotsNeeded / slotsPerBlockRow);
-  const maskRows = Math.floor(height / blockSize);
-  if (reservedBlockRows > maskRows) {
-    throw new Error('Carrier image is too small to hold the header for this payload.');
-  }
-  return reservedBlockRows;
-}
-
-/**
- * Compute per-block complexity scores (mean Sobel magnitude) for a
- * blockSize x blockSize grid over the image.
- */
-export function computeBlockScores(imageData, blockSize) {
-  const { width, height } = imageData;
-  const lum = buildLuminanceMap(imageData);
-  const mag = computeSobelMagnitude(lum, width, height);
-
-  const maskCols = Math.floor(width / blockSize);
-  const maskRows = Math.floor(height / blockSize);
-  const scores = new Float32Array(maskCols * maskRows);
-
-  for (let by = 0; by < maskRows; by++) {
-    for (let bx = 0; bx < maskCols; bx++) {
       let sum = 0;
-      for (let y = 0; y < blockSize; y++) {
-        const py = by * blockSize + y;
-        const rowOffset = py * width;
-        for (let x = 0; x < blockSize; x++) {
-          sum += mag[rowOffset + bx * blockSize + x];
+      let sumSq = 0;
+      let count = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const v = at(x + dx, y + dy);
+          sum += v;
+          sumSq += v * v;
+          count++;
         }
       }
-      scores[by * maskCols + bx] = sum / (blockSize * blockSize);
+      const mean = sum / count;
+      variance[y * width + x] = sumSq / count - mean * mean;
     }
   }
-
-  return { scores, maskCols, maskRows };
+  return variance;
 }
 
 /**
- * Build a binary embed mask (1 = eligible for adaptive embedding) by
- * keeping blocks whose score is at or above the given percentile among
- * blocks outside the reserved header rows. Reserved rows are always 0.
+ * Number of leading pixels (raster order) that must be reserved for the
+ * plain, sequentially-embedded header (1 bit per pixel, via blue LSB).
+ * Purely a function of image geometry and the header's byte size, so both
+ * encoder and decoder derive the same reservation before any variance
+ * analysis.
  */
-export function buildMask(scores, maskCols, maskRows, reservedBlockRows, percentile) {
-  const mask = new Uint8Array(maskCols * maskRows);
-  const eligibleScores = [];
-  for (let by = reservedBlockRows; by < maskRows; by++) {
-    for (let bx = 0; bx < maskCols; bx++) {
-      eligibleScores.push(scores[by * maskCols + bx]);
-    }
+export function computeReservedPixelCount(width, height, headerTotalBytes) {
+  const reserved = headerTotalBytes * 8;
+  if (reserved > width * height) {
+    throw new Error('Carrier image is too small to hold the header for this payload.');
   }
-
-  if (eligibleScores.length === 0) {
-    return { mask, threshold: Infinity, selectedCount: 0 };
-  }
-
-  eligibleScores.sort((a, b) => a - b);
-  const idx = Math.min(
-    eligibleScores.length - 1,
-    Math.floor((percentile / 100) * eligibleScores.length)
-  );
-  const threshold = eligibleScores[idx];
-
-  let selectedCount = 0;
-  for (let by = reservedBlockRows; by < maskRows; by++) {
-    for (let bx = 0; bx < maskCols; bx++) {
-      const i = by * maskCols + bx;
-      if (scores[i] >= threshold) {
-        mask[i] = 1;
-        selectedCount++;
-      }
-    }
-  }
-
-  return { mask, threshold, selectedCount };
+  return reserved;
 }
 
-/** Pack a 0/1-per-block mask into bits, MSB-first, row-major over blocks. */
-export function packMaskBits(mask) {
-  const byteLength = Math.ceil(mask.length / 8);
-  const bytes = new Uint8Array(byteLength);
-  for (let i = 0; i < mask.length; i++) {
-    if (mask[i]) {
-      bytes[i >> 3] |= 0x80 >> (i & 7);
-    }
-  }
-  return bytes;
+/**
+ * Compute the local variance map for a carrier — the expensive pass (a
+ * (2r+1)x(2r+1) window per pixel). Independent of the percentile
+ * thresholds, so it only needs to re-run when the carrier or window radius
+ * changes; `classifyTiers` below is cheap and can re-run on every UI
+ * threshold change.
+ */
+export function computeVarianceMap(imageData, windowRadius) {
+  const { width, height } = imageData;
+  const lum = buildLuminanceMap(imageData);
+  const variance = computeLocalVariance(lum, width, height, windowRadius);
+  return { variance, width, height, windowRadius };
 }
 
-/** Inverse of packMaskBits. */
-export function unpackMaskBits(bytes, blockCount) {
-  const mask = new Uint8Array(blockCount);
-  for (let i = 0; i < blockCount; i++) {
-    const bit = (bytes[i >> 3] >> (7 - (i & 7))) & 1;
-    mask[i] = bit;
+/**
+ * Cheaply derive a percentile-based bit-depth tier (0, 1, or 2) for every
+ * pixel outside the reserved header region, from a pre-computed variance
+ * map. Reserved pixels always get tier 0.
+ *
+ * Tiers are assigned by *rank* (position in the sorted-by-variance order),
+ * not by comparing against a threshold value: large flat regions (sky,
+ * backgrounds, solid UI chrome) can put many thousands of pixels at an
+ * identical — often exactly zero — variance, and a value-based threshold
+ * would dump all of them into a single tier instead of splitting cleanly
+ * at the requested percentiles.
+ */
+export function classifyTiers(variance, width, height, reservedPixelCount, lowPercentile, highPercentile) {
+  const totalPixels = width * height;
+  const eligibleCount = totalPixels - reservedPixelCount;
+  const tiers = new Uint8Array(totalPixels); // defaults to 0
+
+  if (eligibleCount <= 0) {
+    return { tiers, lowThreshold: Infinity, highThreshold: Infinity, tierCounts: [totalPixels, 0, 0] };
   }
-  return mask;
+
+  const order = new Array(eligibleCount);
+  for (let i = 0; i < eligibleCount; i++) order[i] = reservedPixelCount + i;
+  order.sort((a, b) => variance[a] - variance[b]);
+
+  const lowCut = Math.floor((lowPercentile / 100) * eligibleCount);
+  const highCut = Math.floor((highPercentile / 100) * eligibleCount);
+
+  const tierCounts = [reservedPixelCount, 0, 0];
+  for (let rank = 0; rank < eligibleCount; rank++) {
+    const p = order[rank];
+    const tier = rank >= highCut ? 2 : rank >= lowCut ? 1 : 0;
+    tiers[p] = tier;
+    tierCounts[tier]++;
+  }
+
+  const lowThreshold = variance[order[Math.min(lowCut, eligibleCount - 1)]];
+  const highThreshold = variance[order[Math.min(highCut, eligibleCount - 1)]];
+
+  return { tiers, lowThreshold, highThreshold, tierCounts };
 }
 
 /**
  * Render a semi-transparent overlay (same pixel size as the carrier) that
- * highlights selected blocks in green, unselected eligible blocks in a dim
- * red, and the reserved header region in a neutral hatch-free gray. Used as
- * the "Complexity Visualizer" in the UI.
+ * highlights each pixel's tier: none for 0 bits (smooth, skipped), amber
+ * for 1 bit, green for 2 bits, and a neutral gray for the header-reserved
+ * region. Used as the "Complexity Visualizer" in the UI. Drawn at a coarse
+ * block resolution for legibility/performance rather than literal per-pixel
+ * dots.
  */
-export function renderMaskOverlay(width, height, blockSize, mask, maskCols, maskRows, reservedBlockRows) {
+export function renderTierOverlay(width, height, tiers, reservedPixelCount, blockSize = 4) {
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
   const ctx = canvas.getContext('2d');
 
-  for (let by = 0; by < maskRows; by++) {
-    for (let bx = 0; bx < maskCols; bx++) {
-      let color;
-      if (by < reservedBlockRows) {
-        color = 'rgba(140, 140, 150, 0.55)';
-      } else if (mask[by * maskCols + bx]) {
-        color = 'rgba(79, 191, 143, 0.55)';
-      } else {
-        color = 'rgba(229, 101, 122, 0.25)';
-      }
+  const tierColor = ['rgba(0,0,0,0)', 'rgba(230, 179, 60, 0.45)', 'rgba(79, 191, 143, 0.55)'];
+  const reservedColor = 'rgba(140, 140, 150, 0.55)';
+
+  for (let by = 0; by < height; by += blockSize) {
+    for (let bx = 0; bx < width; bx += blockSize) {
+      const p = by * width + bx;
+      const color = p < reservedPixelCount ? reservedColor : tierColor[tiers[p]];
+      if (color === tierColor[0]) continue;
       ctx.fillStyle = color;
-      ctx.fillRect(bx * blockSize, by * blockSize, blockSize, blockSize);
+      ctx.fillRect(bx, by, blockSize, blockSize);
     }
   }
 

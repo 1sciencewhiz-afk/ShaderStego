@@ -2,8 +2,17 @@ import { encryptBytes, decryptBytes } from './crypto.js';
 import { packPayload, unpackPayload } from './filePacking.js';
 import { buildPacket, computeCanvasDimensions, embedPacket, extractPacket } from './steganography.js';
 import { renderShaderCanvas } from './shaderRenderer.js';
-import { renderMaskOverlay } from './complexity.js';
+import { renderTierOverlay } from './complexity.js';
 import { scoreCarrier, buildAnalysis, embedAdaptive, extractAdaptive } from './steganographyV2.js';
+
+/** Debounce a function so rapid-fire calls (e.g. slider drags) only run it once things settle. */
+function debounce(fn, delayMs) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), delayMs);
+  };
+}
 
 // Practical safety cap: a WebGL2/2D canvas this large is at the edge of what
 // browsers reliably allocate, and gets slow well before that. Payloads that
@@ -360,11 +369,13 @@ decodeButton.addEventListener('click', async () => {
 const adaptiveCarrierFile = document.getElementById('adaptive-carrier-file');
 const adaptiveGenerateButton = document.getElementById('adaptive-generate-button');
 const adaptiveCarrierPreview = document.getElementById('adaptive-carrier-preview');
-const adaptiveBlockSizeSelect = document.getElementById('adaptive-block-size');
-const adaptiveThreshold = document.getElementById('adaptive-threshold');
-const adaptiveThresholdValue = document.getElementById('adaptive-threshold-value');
+const adaptiveWindowRadiusSelect = document.getElementById('adaptive-window-radius');
+const adaptiveLowThreshold = document.getElementById('adaptive-low-threshold');
+const adaptiveLowThresholdValue = document.getElementById('adaptive-low-threshold-value');
+const adaptiveHighThreshold = document.getElementById('adaptive-high-threshold');
+const adaptiveHighThresholdValue = document.getElementById('adaptive-high-threshold-value');
 const adaptiveCapacityMeter = document.getElementById('adaptive-capacity-meter');
-const adaptiveSelectedBlocksEl = document.getElementById('adaptive-selected-blocks');
+const adaptiveTierCountsEl = document.getElementById('adaptive-tier-counts');
 const adaptiveCapacityBitsEl = document.getElementById('adaptive-capacity-bits');
 const adaptiveSequentialBitsEl = document.getElementById('adaptive-sequential-bits');
 const adaptiveVisualizer = document.getElementById('adaptive-visualizer');
@@ -376,8 +387,8 @@ const adaptiveEncodePreview = document.getElementById('adaptive-encode-preview')
 const adaptiveDownloadLink = document.getElementById('adaptive-download-link');
 const adaptiveEncodeCapacityHint = document.getElementById('adaptive-encode-capacity-hint');
 
-let adaptiveScored = null; // expensive Sobel/block-score pass, cached per carrier + block size
-let adaptiveAnalysis = null; // cheap threshold-derived mask, cached per slider position
+let adaptiveScored = null; // expensive local-variance pass, cached per carrier + window radius
+let adaptiveAnalysis = null; // cheap threshold-derived tier map, cached per slider position
 
 function formatBits(bits) {
   return `${bits} bits (${(bits / 8).toFixed(0)} bytes)`;
@@ -392,15 +403,16 @@ function updateAdaptivePayloadCapacityHint() {
     return;
   }
 
-  // Rough overhead estimate (metadata header + AES-GCM tag); the real check
-  // at embed time uses the exact packed+encrypted ciphertext length.
-  const neededBits = (approxBytes + 60) * 8;
-  const available = adaptiveAnalysis.adaptiveCapacityBits;
+  // Rough overhead estimate (metadata header + gzip framing + AES-GCM tag);
+  // the real check at embed time uses the exact packed+compressed+encrypted
+  // ciphertext length.
+  const neededBits = (approxBytes + 80) * 8;
+  const available = adaptiveAnalysis.capacityBits;
   const tooBig = neededBits > available;
 
   adaptiveEncodeCapacityHint.textContent = tooBig
-    ? `Payload (~${formatFileSize(approxBytes)}) likely exceeds the ${formatBits(available)} available at this threshold. Lower the threshold, use a bigger/more complex carrier, or a smaller file.`
-    : `Payload (~${formatFileSize(approxBytes)}) fits within the ${formatBits(available)} available at this threshold.`;
+    ? `Payload (~${formatFileSize(approxBytes)}) likely exceeds the ${formatBits(available)} available at these thresholds. Lower the cutoffs, use a bigger/more textured carrier, or a smaller file.`
+    : `Payload (~${formatFileSize(approxBytes)}) fits within the ${formatBits(available)} available at these thresholds.`;
   adaptiveEncodeCapacityHint.classList.toggle('capacity-warning', tooBig);
   adaptiveEncodeCapacityHint.classList.remove('hidden');
 }
@@ -428,9 +440,9 @@ function recomputeAdaptiveScoring() {
   if (!adaptiveCarrierPreview.width) return;
   const ctx = adaptiveCarrierPreview.getContext('2d');
   const imageData = ctx.getImageData(0, 0, adaptiveCarrierPreview.width, adaptiveCarrierPreview.height);
-  const blockSize = Number(adaptiveBlockSizeSelect.value);
+  const windowRadius = Number(adaptiveWindowRadiusSelect.value);
   try {
-    adaptiveScored = scoreCarrier(imageData, blockSize);
+    adaptiveScored = scoreCarrier(imageData, windowRadius);
     recomputeAdaptiveAnalysis();
   } catch (err) {
     adaptiveScored = null;
@@ -441,18 +453,27 @@ function recomputeAdaptiveScoring() {
 
 function recomputeAdaptiveAnalysis() {
   if (!adaptiveScored) return;
-  const percentile = Number(adaptiveThreshold.value);
-  adaptiveThresholdValue.textContent = String(percentile);
-  adaptiveAnalysis = buildAnalysis(adaptiveScored, percentile);
 
-  const { width, height, blockSize, mask, maskCols, maskRows, reservedBlockRows, selectedBlocks, totalBlocks, adaptiveCapacityBits, sequentialCapacityBits } = adaptiveAnalysis;
+  let lowPercentile = Number(adaptiveLowThreshold.value);
+  let highPercentile = Number(adaptiveHighThreshold.value);
+  // Keep the two cutoffs from crossing (low must stay below high).
+  if (lowPercentile >= highPercentile) {
+    lowPercentile = Math.max(0, highPercentile - 1);
+    adaptiveLowThreshold.value = String(lowPercentile);
+  }
+  adaptiveLowThresholdValue.textContent = String(lowPercentile);
+  adaptiveHighThresholdValue.textContent = String(100 - highPercentile);
 
-  adaptiveSelectedBlocksEl.textContent = `${selectedBlocks} / ${totalBlocks}`;
-  adaptiveCapacityBitsEl.textContent = formatBits(adaptiveCapacityBits);
+  adaptiveAnalysis = buildAnalysis(adaptiveScored, lowPercentile, highPercentile);
+
+  const { width, height, tiers, reservedPixelCount, tierCounts, capacityBits, sequentialCapacityBits } = adaptiveAnalysis;
+
+  adaptiveTierCountsEl.textContent = `${tierCounts[0]} / ${tierCounts[1]} / ${tierCounts[2]}`;
+  adaptiveCapacityBitsEl.textContent = formatBits(capacityBits);
   adaptiveSequentialBitsEl.textContent = formatBits(sequentialCapacityBits);
   adaptiveCapacityMeter.classList.remove('hidden');
 
-  const overlay = renderMaskOverlay(width, height, blockSize, mask, maskCols, maskRows, reservedBlockRows);
+  const overlay = renderTierOverlay(width, height, tiers, reservedPixelCount);
   adaptiveVisualizer.width = width;
   adaptiveVisualizer.height = height;
   const vctx = adaptiveVisualizer.getContext('2d');
@@ -462,6 +483,7 @@ function recomputeAdaptiveAnalysis() {
 
   updateAdaptivePayloadCapacityHint();
 }
+const recomputeAdaptiveAnalysisDebounced = debounce(recomputeAdaptiveAnalysis, 150);
 
 adaptiveCarrierFile.addEventListener('change', async () => {
   const file = adaptiveCarrierFile.files[0];
@@ -474,7 +496,7 @@ adaptiveCarrierFile.addEventListener('change', async () => {
     canvas.getContext('2d').drawImage(img, 0, 0);
     drawCarrierToPreview(canvas);
     recomputeAdaptiveScoring();
-    setStatus(adaptiveEncodeStatus, 'Carrier loaded. Analyzing complexity...', 'info');
+    setStatus(adaptiveEncodeStatus, 'Carrier loaded. Analyzing local variance...', 'info');
   } catch (err) {
     setStatus(adaptiveEncodeStatus, `Error: ${err.message}`, 'error');
   }
@@ -485,14 +507,15 @@ adaptiveGenerateButton.addEventListener('click', () => {
     const canvas = renderShaderCanvas(512, 512);
     drawCarrierToPreview(canvas);
     recomputeAdaptiveScoring();
-    setStatus(adaptiveEncodeStatus, 'Procedural carrier generated. Analyzing complexity...', 'info');
+    setStatus(adaptiveEncodeStatus, 'Procedural carrier generated. Analyzing local variance...', 'info');
   } catch (err) {
     setStatus(adaptiveEncodeStatus, `Error: ${err.message}`, 'error');
   }
 });
 
-adaptiveBlockSizeSelect.addEventListener('change', recomputeAdaptiveScoring);
-adaptiveThreshold.addEventListener('input', recomputeAdaptiveAnalysis);
+adaptiveWindowRadiusSelect.addEventListener('change', recomputeAdaptiveScoring);
+adaptiveLowThreshold.addEventListener('input', recomputeAdaptiveAnalysisDebounced);
+adaptiveHighThreshold.addEventListener('input', recomputeAdaptiveAnalysisDebounced);
 
 adaptiveEncodeButton.addEventListener('click', async () => {
   const text = adaptiveEncodeText.value;
@@ -530,13 +553,14 @@ adaptiveEncodeButton.addEventListener('click', async () => {
     }
     const packed = packPayload(payloadBytes, name, type);
 
-    setStatus(adaptiveEncodeStatus, 'Encrypting and embedding...', 'info');
+    setStatus(adaptiveEncodeStatus, 'Compressing and encrypting...', 'info');
     const { salt, iv, ciphertext } = await encryptBytes(packed, password);
 
+    setStatus(adaptiveEncodeStatus, 'Scattering payload across allocated pixels...', 'info');
     const ctx = adaptiveCarrierPreview.getContext('2d');
     const imageData = ctx.getImageData(0, 0, adaptiveCarrierPreview.width, adaptiveCarrierPreview.height);
 
-    embedAdaptive(imageData, salt, iv, ciphertext, adaptiveAnalysis);
+    await embedAdaptive(imageData, salt, iv, ciphertext, password, adaptiveAnalysis);
     ctx.putImageData(imageData, 0, 0);
 
     adaptiveEncodePreview.src = adaptiveCarrierPreview.toDataURL('image/png');
@@ -549,9 +573,10 @@ adaptiveEncodeButton.addEventListener('click', async () => {
       adaptiveDownloadLink.classList.remove('hidden');
     }, 'image/png');
 
+    const [, tier1, tier2] = adaptiveAnalysis.tierCounts;
     setStatus(
       adaptiveEncodeStatus,
-      `Done. Payload hidden across ${adaptiveAnalysis.selectedBlocks} high-complexity blocks.`,
+      `Done. Payload scattered across ${tier1 + tier2} allocated pixels (${tier2} carrying 2 bits).`,
       'success'
     );
   } catch (err) {
@@ -604,10 +629,10 @@ adaptiveDecodeButton.addEventListener('click', async () => {
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-    setStatus(adaptiveDecodeStatus, 'Extracting hidden payload...', 'info');
-    const { salt, iv, ciphertext, mask, maskCols, maskRows, blockSize } = extractAdaptive(imageData);
+    setStatus(adaptiveDecodeStatus, 'Deriving passphrase-seeded scatter order and extracting payload...', 'info');
+    const { salt, iv, ciphertext, tiers, reservedPixelCount } = await extractAdaptive(imageData, password);
 
-    const overlay = renderMaskOverlay(canvas.width, canvas.height, blockSize, mask, maskCols, maskRows, 0);
+    const overlay = renderTierOverlay(canvas.width, canvas.height, tiers, reservedPixelCount);
     adaptiveDecodeVisualizer.width = canvas.width;
     adaptiveDecodeVisualizer.height = canvas.height;
     const vctx = adaptiveDecodeVisualizer.getContext('2d');

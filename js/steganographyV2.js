@@ -1,43 +1,41 @@
-// V2 adaptive steganography: orchestrates complexity masking (complexity.js)
-// and Hamming matrix coding (hamming.js) around the same AES-GCM payload
-// crypto.js already provides.
+// V2 adaptive steganography: orchestrates the variance cost map
+// (complexity.js) and passphrase-seeded permutation (prng.js) around the
+// same AES-GCM(+gzip) payload crypto.js already provides.
 //
 // Layout inside the image:
-//   1. A "header region" — the first N pixels in simple raster order — holds
-//      the fixed header fields followed by the packed embed mask, written
-//      with plain sequential LSB (1 bit per R/G/B channel). This must be
-//      readable without knowing anything else about the image, so it never
-//      uses adaptive selection or matrix coding.
-//   2. The ciphertext is embedded via Hamming(7,3) matrix coding, but only
-//      into channel slots belonging to blocks the embed mask marks as 1.
-//      Blocks touched by the header region are always excluded from the
-//      mask at encode time, so the two regions never collide.
+//   1. A "header region" — the first N pixels in raster order — holds the
+//      fixed header fields via plain sequential LSB (1 bit per pixel, blue
+//      channel only). This must be readable without knowing anything else
+//      about the image, so it never depends on variance analysis or the
+//      passphrase-derived permutation.
+//   2. The ciphertext is embedded into the blue-channel LSB (and, for
+//      2-bit pixels, LSB+1) of every pixel the variance cost map allocates
+//      capacity to — outside the header region — in an order scattered by
+//      a Fisher-Yates shuffle seeded from the passphrase and salt. Without
+//      the correct passphrase, the scatter order (and hence which bits are
+//      the payload) is unrecoverable even if the variance map itself is
+//      re-derived.
 //
 // Header fields (big-endian):
-//   [0:6]   Magic 'STEGV2'
+//   [0:6]   Magic 'STEGV3'
 //   [6:22]  Salt (16 bytes)
 //   [22:34] IV (12 bytes)
-//   [34:35] Block size in pixels (1 byte)
-//   [35:37] Mask columns (uint16)
-//   [37:39] Mask rows (uint16)
-//   [39:43] Ciphertext length in bytes (uint32)
-//   [43:...] Packed embed mask (ceil(maskCols*maskRows/8) bytes)
+//   [34:35] Variance window radius in pixels (1 byte)
+//   [35:36] Low variance percentile (1 byte, 0-100)
+//   [36:37] High variance percentile (1 byte, 0-100)
+//   [37:41] Ciphertext length in bytes (uint32)
 
 import { SALT_LENGTH, IV_LENGTH } from './crypto.js';
-import {
-  computeReservedBlockRows,
-  computeBlockScores,
-  buildMask,
-  packMaskBits,
-  unpackMaskBits,
-} from './complexity.js';
-import { embedBitstream, extractBitstream } from './hamming.js';
+import { computeReservedPixelCount, computeVarianceMap, classifyTiers } from './complexity.js';
+import { deriveSeed, shuffleWithSeed } from './prng.js';
 
-const MAGIC = [0x53, 0x54, 0x45, 0x47, 0x56, 0x32]; // 'STEGV2'
-const FIXED_HEADER_SIZE = MAGIC.length + SALT_LENGTH + IV_LENGTH + 1 + 2 + 2 + 4; // 43
+const MAGIC = [0x53, 0x54, 0x45, 0x47, 0x56, 0x33]; // 'STEGV3'
+const FIXED_HEADER_SIZE = MAGIC.length + SALT_LENGTH + IV_LENGTH + 1 + 1 + 1 + 4; // 41
 
-function sequentialSlot(index) {
-  return Math.floor(index / 3) * 4 + (index % 3);
+const BLUE_OFFSET = 2;
+
+function headerSlot(pixelIndex) {
+  return pixelIndex * 4 + BLUE_OFFSET;
 }
 
 function bytesToBits(bytes) {
@@ -61,35 +59,36 @@ function bitsToBytes(bits) {
   return out;
 }
 
-function writeSequentialBytes(data, startSlot, bytes) {
+function writeHeaderBytes(data, bytes) {
   const bits = bytesToBits(bytes);
   for (let i = 0; i < bits.length; i++) {
-    const idx = sequentialSlot(startSlot + i);
+    const idx = headerSlot(i);
     data[idx] = (data[idx] & 0xfe) | bits[i];
   }
 }
 
-function readSequentialBytes(data, startSlot, numBytes) {
+function readHeaderBytes(data, numBytes) {
   const numBits = numBytes * 8;
   const bits = new Array(numBits);
   for (let i = 0; i < numBits; i++) {
-    bits[i] = data[sequentialSlot(startSlot + i)] & 1;
+    bits[i] = data[headerSlot(i)] & 1;
   }
   return bitsToBytes(bits);
 }
 
-function buildFixedHeader(salt, iv, blockSize, maskCols, maskRows, ciphertextLength) {
+function buildFixedHeader(salt, iv, windowRadius, lowPercentile, highPercentile, ciphertextLength) {
   const header = new Uint8Array(FIXED_HEADER_SIZE);
   header.set(MAGIC, 0);
   header.set(salt, MAGIC.length);
   header.set(iv, MAGIC.length + SALT_LENGTH);
-  header[MAGIC.length + SALT_LENGTH + IV_LENGTH] = blockSize;
 
-  const view = new DataView(header.buffer);
-  const maskColsOffset = MAGIC.length + SALT_LENGTH + IV_LENGTH + 1;
-  view.setUint16(maskColsOffset, maskCols, false);
-  view.setUint16(maskColsOffset + 2, maskRows, false);
-  view.setUint32(maskColsOffset + 4, ciphertextLength, false);
+  let offset = MAGIC.length + SALT_LENGTH + IV_LENGTH;
+  header[offset] = windowRadius;
+  header[offset + 1] = lowPercentile;
+  header[offset + 2] = highPercentile;
+  offset += 3;
+
+  new DataView(header.buffer).setUint32(offset, ciphertextLength, false);
 
   return header;
 }
@@ -101,157 +100,182 @@ function parseFixedHeader(bytes) {
   }
   const salt = bytes.slice(MAGIC.length, MAGIC.length + SALT_LENGTH);
   const iv = bytes.slice(MAGIC.length + SALT_LENGTH, MAGIC.length + SALT_LENGTH + IV_LENGTH);
-  const blockSize = bytes[MAGIC.length + SALT_LENGTH + IV_LENGTH];
+
+  let offset = MAGIC.length + SALT_LENGTH + IV_LENGTH;
+  const windowRadius = bytes[offset];
+  const lowPercentile = bytes[offset + 1];
+  const highPercentile = bytes[offset + 2];
+  offset += 3;
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const maskColsOffset = MAGIC.length + SALT_LENGTH + IV_LENGTH + 1;
-  const maskCols = view.getUint16(maskColsOffset, false);
-  const maskRows = view.getUint16(maskColsOffset + 2, false);
-  const ciphertextLength = view.getUint32(maskColsOffset + 4, false);
+  const ciphertextLength = view.getUint32(offset, false);
 
-  return { salt, iv, blockSize, maskCols, maskRows, ciphertextLength };
+  return { salt, iv, windowRadius, lowPercentile, highPercentile, ciphertextLength };
 }
 
-/** Build the flat list of data-array byte indices for blocks marked 1 in mask. */
-function buildAdaptiveSlots(mask, maskCols, maskRows, blockSize, width) {
+/**
+ * Build the ordered (pre-shuffle) list of capacity slot ids from a tier
+ * map: one slot per bit of capacity, in raster order. A slot id encodes
+ * (pixelIndex, bitPosition) as `pixelIndex * 2 + bitPosition` (bitPosition
+ * 0 = blue LSB, 1 = blue LSB+1).
+ */
+function buildCapacitySlots(tiers) {
   const slots = [];
-  for (let by = 0; by < maskRows; by++) {
-    for (let bx = 0; bx < maskCols; bx++) {
-      if (!mask[by * maskCols + bx]) continue;
-      for (let y = 0; y < blockSize; y++) {
-        const py = by * blockSize + y;
-        const rowBase = py * width;
-        for (let x = 0; x < blockSize; x++) {
-          const px = bx * blockSize + x;
-          const pixelIdx = (rowBase + px) * 4;
-          slots.push(pixelIdx, pixelIdx + 1, pixelIdx + 2);
-        }
-      }
-    }
+  for (let p = 0; p < tiers.length; p++) {
+    const tier = tiers[p];
+    if (tier >= 1) slots.push(p * 2);
+    if (tier === 2) slots.push(p * 2 + 1);
   }
   return slots;
 }
 
-/**
- * Run the expensive part of carrier analysis (Sobel + per-block scoring)
- * once for a given carrier + block size. The result can be re-used across
- * many threshold changes via `buildAnalysis` below, so a UI slider doesn't
- * re-run the Sobel pass on every tick.
- */
-export function scoreCarrier(imageData, blockSize) {
-  const { width, height } = imageData;
-  const maskCols = Math.floor(width / blockSize);
-  const maskRows = Math.floor(height / blockSize);
-  const maskBytes = Math.ceil((maskCols * maskRows) / 8);
-  const headerTotalBytes = FIXED_HEADER_SIZE + maskBytes;
-  const reservedBlockRows = computeReservedBlockRows(width, height, blockSize, headerTotalBytes);
+function getSlotBit(data, slot) {
+  const pixelIndex = Math.floor(slot / 2);
+  const bitPos = slot % 2;
+  const byteIdx = pixelIndex * 4 + BLUE_OFFSET;
+  return (data[byteIdx] >> bitPos) & 1;
+}
 
-  const { scores } = computeBlockScores(imageData, blockSize);
-
-  return { scores, width, height, blockSize, maskCols, maskRows, reservedBlockRows };
+function setSlotBit(data, slot, bitValue) {
+  const pixelIndex = Math.floor(slot / 2);
+  const bitPos = slot % 2;
+  const byteIdx = pixelIndex * 4 + BLUE_OFFSET;
+  const mask = 1 << bitPos;
+  data[byteIdx] = (data[byteIdx] & ~mask) | (bitValue << bitPos);
 }
 
 /**
- * Cheaply derive the embed mask, capacity, and stats for a threshold
- * percentile from a pre-computed `scoreCarrier` result. Used to drive the
- * Complexity Visualizer and Capacity Meter in the UI.
+ * Run the expensive part of carrier analysis (local variance) once for a
+ * given carrier + window radius. The result can be re-used across many
+ * threshold changes via `buildAnalysis` below, so a UI slider doesn't
+ * re-run the variance pass on every tick.
  */
-export function buildAnalysis(scored, percentile) {
-  const { scores, width, height, blockSize, maskCols, maskRows, reservedBlockRows } = scored;
+export function scoreCarrier(imageData, windowRadius) {
+  const { width, height } = imageData;
+  const reservedPixelCount = computeReservedPixelCount(width, height, FIXED_HEADER_SIZE);
+  const { variance } = computeVarianceMap(imageData, windowRadius);
+  return { variance, width, height, windowRadius, reservedPixelCount };
+}
 
-  const { mask, threshold, selectedCount } = buildMask(
-    scores,
-    maskCols,
-    maskRows,
-    reservedBlockRows,
-    percentile
+/**
+ * Cheaply derive the tier map, capacity, and stats for a pair of
+ * percentile thresholds from a pre-computed `scoreCarrier` result. Used to
+ * drive the Complexity Visualizer and Capacity Meter in the UI.
+ */
+export function buildAnalysis(scored, lowPercentile, highPercentile) {
+  const { variance, width, height, windowRadius, reservedPixelCount } = scored;
+  const { tiers, lowThreshold, highThreshold, tierCounts } = classifyTiers(
+    variance,
+    width,
+    height,
+    reservedPixelCount,
+    lowPercentile,
+    highPercentile
   );
 
-  const adaptiveCapacityBits = Math.floor((selectedCount * blockSize * blockSize * 3) / 7) * 3;
-  const sequentialCapacityBits = width * height * 3; // R/G/B per pixel
+  const capacityBits = tierCounts[1] * 1 + tierCounts[2] * 2;
+  const sequentialCapacityBits = width * height * 3; // reference: plain 1-bit R/G/B LSB
 
   return {
     width,
     height,
-    blockSize,
-    maskCols,
-    maskRows,
-    reservedBlockRows,
-    totalBlocks: maskCols * maskRows,
-    selectedBlocks: selectedCount,
-    threshold,
-    mask,
-    adaptiveCapacityBits,
+    windowRadius,
+    reservedPixelCount,
+    lowPercentile,
+    highPercentile,
+    lowThreshold,
+    highThreshold,
+    tiers,
+    tierCounts,
+    totalPixels: width * height,
+    capacityBits,
     sequentialCapacityBits,
   };
 }
 
 /** Convenience: score + build analysis in one call (used by tests / one-off calls). */
-export function analyzeCarrier(imageData, blockSize, percentile) {
-  return buildAnalysis(scoreCarrier(imageData, blockSize), percentile);
+export function analyzeCarrier(imageData, windowRadius, lowPercentile, highPercentile) {
+  return buildAnalysis(scoreCarrier(imageData, windowRadius), lowPercentile, highPercentile);
 }
 
 /**
- * Embed `ciphertext` (already AES-GCM encrypted) into `imageData` in place,
- * using a previously computed `analysis` (from buildAnalysis/analyzeCarrier)
- * so the mask actually embedded matches whatever the UI last showed the user.
+ * Embed `ciphertext` (already compressed + AES-GCM encrypted) into
+ * `imageData` in place, using a previously computed `analysis` (from
+ * buildAnalysis/analyzeCarrier) so the tier map actually embedded matches
+ * whatever the UI last showed the user.
  */
-export function embedAdaptive(imageData, salt, iv, ciphertext, analysis) {
-  const { blockSize, maskCols, maskRows, mask, adaptiveCapacityBits } = analysis;
+export async function embedAdaptive(imageData, salt, iv, ciphertext, passphrase, analysis) {
+  const { windowRadius, lowPercentile, highPercentile, tiers, capacityBits } = analysis;
 
   const payloadBits = ciphertext.length * 8;
-  if (payloadBits > adaptiveCapacityBits) {
+  if (payloadBits > capacityBits) {
     throw new Error(
-      `Payload needs ${payloadBits} bits but only ${adaptiveCapacityBits} bits are available ` +
-        `at the current complexity threshold. Lower the threshold or use a larger/more complex image.`
+      `Payload needs ${payloadBits} bits but only ${capacityBits} bits are available ` +
+        `at the current variance thresholds. Lower the thresholds or use a larger/more textured image.`
     );
   }
 
-  const maskBytes = packMaskBits(mask);
-  const fixedHeader = buildFixedHeader(salt, iv, blockSize, maskCols, maskRows, ciphertext.length);
-
-  const headerPacket = new Uint8Array(fixedHeader.length + maskBytes.length);
-  headerPacket.set(fixedHeader, 0);
-  headerPacket.set(maskBytes, fixedHeader.length);
+  const fixedHeader = buildFixedHeader(salt, iv, windowRadius, lowPercentile, highPercentile, ciphertext.length);
 
   const data = imageData.data;
-  writeSequentialBytes(data, 0, headerPacket);
+  writeHeaderBytes(data, fixedHeader);
 
-  const adaptiveSlots = buildAdaptiveSlots(mask, maskCols, maskRows, blockSize, imageData.width);
-  const getBit = (slot) => data[slot] & 1;
-  const setBit = (slot, bit) => {
-    data[slot] = (data[slot] & 0xfe) | bit;
-  };
-  embedBitstream(bytesToBits(ciphertext), adaptiveSlots, getBit, setBit);
+  const slots = buildCapacitySlots(tiers);
+  const seed = await deriveSeed(passphrase, salt);
+  shuffleWithSeed(slots, seed);
+
+  const bits = bytesToBits(ciphertext);
+  for (let i = 0; i < bits.length; i++) {
+    setSlotBit(data, slots[i], bits[i]);
+  }
 
   return analysis;
 }
 
 /**
  * Extract and decrypt-ready material from a stego image produced by
- * embedAdaptive. Returns { salt, iv, ciphertext, mask, maskCols, maskRows,
- * blockSize } — the caller decrypts ciphertext with crypto.js.
+ * embedAdaptive. Returns { salt, iv, ciphertext, tiers, tierCounts,
+ * reservedPixelCount, width, height } — the caller decrypts+decompresses
+ * ciphertext with crypto.js.
  */
-export function extractAdaptive(imageData) {
+export async function extractAdaptive(imageData, passphrase) {
   const data = imageData.data;
-  const totalSlots = Math.floor((data.length / 4) * 3);
+  const { width, height } = imageData;
+  const totalPixels = width * height;
 
-  if (totalSlots < FIXED_HEADER_SIZE * 8) {
+  if (totalPixels < FIXED_HEADER_SIZE * 8) {
     throw new Error('Image is too small to contain an adaptive header.');
   }
 
-  const fixedHeaderBytes = readSequentialBytes(data, 0, FIXED_HEADER_SIZE);
-  const { salt, iv, blockSize, maskCols, maskRows, ciphertextLength } =
+  const fixedHeaderBytes = readHeaderBytes(data, FIXED_HEADER_SIZE);
+  const { salt, iv, windowRadius, lowPercentile, highPercentile, ciphertextLength } =
     parseFixedHeader(fixedHeaderBytes);
 
-  const maskByteLength = Math.ceil((maskCols * maskRows) / 8);
-  const maskBytes = readSequentialBytes(data, FIXED_HEADER_SIZE * 8, maskByteLength);
-  const mask = unpackMaskBits(maskBytes, maskCols * maskRows);
+  const reservedPixelCount = computeReservedPixelCount(width, height, FIXED_HEADER_SIZE);
+  const { variance } = computeVarianceMap(imageData, windowRadius);
+  const { tiers, tierCounts } = classifyTiers(
+    variance,
+    width,
+    height,
+    reservedPixelCount,
+    lowPercentile,
+    highPercentile
+  );
 
-  const adaptiveSlots = buildAdaptiveSlots(mask, maskCols, maskRows, blockSize, imageData.width);
-  const getBit = (slot) => data[slot] & 1;
-  const bits = extractBitstream(ciphertextLength * 8, adaptiveSlots, getBit);
+  const slots = buildCapacitySlots(tiers);
+  const seed = await deriveSeed(passphrase, salt);
+  shuffleWithSeed(slots, seed);
+
+  const neededBits = ciphertextLength * 8;
+  if (neededBits > slots.length) {
+    throw new Error('Hidden payload appears truncated or corrupted.');
+  }
+
+  const bits = new Array(neededBits);
+  for (let i = 0; i < neededBits; i++) {
+    bits[i] = getSlotBit(data, slots[i]);
+  }
   const ciphertext = bitsToBytes(bits);
 
-  return { salt, iv, ciphertext, mask, maskCols, maskRows, blockSize };
+  return { salt, iv, ciphertext, tiers, tierCounts, reservedPixelCount, width, height };
 }

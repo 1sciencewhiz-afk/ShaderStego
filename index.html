@@ -69,8 +69,12 @@
 
       <section id="adaptive-encode-panel" class="tab-panel">
         <p class="section-hint">
-          Hides data only inside high-complexity (edge/texture-rich) regions of a carrier
-          image, using Hamming matrix coding to flip far fewer bits than plain LSB.
+          Allocates 0/1/2 bits per pixel by local variance — smooth regions are left
+          untouched, textured regions carry more — then scatters the payload across the
+          allocated pixels using a passphrase-seeded shuffle, so the placement is
+          unrecoverable without the correct passphrase even if the variance map is
+          re-derived. Payloads are gzip-compressed before encryption to stretch capacity
+          further.
         </p>
 
         <label for="adaptive-carrier-file">Carrier image (PNG, upload)</label>
@@ -83,20 +87,24 @@
 
         <canvas id="adaptive-carrier-preview" class="preview hidden"></canvas>
 
-        <label for="adaptive-block-size">Block size (px)</label>
-        <select id="adaptive-block-size">
-          <option value="4">4 x 4 (finer mask, slower)</option>
-          <option value="8" selected>8 x 8 (recommended)</option>
-          <option value="16">16 x 16 (coarser mask, faster)</option>
+        <label for="adaptive-window-radius">Variance window</label>
+        <select id="adaptive-window-radius">
+          <option value="1" selected>3 x 3 (recommended)</option>
+          <option value="2">5 x 5 (smoother, slower)</option>
         </select>
 
-        <label for="adaptive-threshold">
-          Complexity threshold: top <span id="adaptive-threshold-value">50</span>% of blocks
+        <label for="adaptive-low-threshold">
+          Smooth-region cutoff: bottom <span id="adaptive-low-threshold-value">40</span>% of pixels get 0 bits
         </label>
-        <input id="adaptive-threshold" type="range" min="0" max="95" value="50" step="1" />
+        <input id="adaptive-low-threshold" type="range" min="0" max="95" value="40" step="1" />
+
+        <label for="adaptive-high-threshold">
+          High-detail cutoff: top <span id="adaptive-high-threshold-value">25</span>% of pixels get 2 bits
+        </label>
+        <input id="adaptive-high-threshold" type="range" min="5" max="100" value="75" step="1" />
 
         <div id="adaptive-capacity-meter" class="capacity-meter hidden">
-          <div><strong>Selected blocks:</strong> <span id="adaptive-selected-blocks">-</span></div>
+          <div><strong>0-bit / 1-bit / 2-bit pixels:</strong> <span id="adaptive-tier-counts">-</span></div>
           <div><strong>Adaptive capacity:</strong> <span id="adaptive-capacity-bits">-</span></div>
           <div><strong>Sequential LSB capacity (reference):</strong> <span id="adaptive-sequential-bits">-</span></div>
         </div>

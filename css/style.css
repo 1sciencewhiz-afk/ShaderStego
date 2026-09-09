@@ -232,6 +232,7 @@ select {
 }
 
 .dropzone {
+  display: block;
   position: relative;
   border: 1px dashed var(--border);
   border-radius: 8px;
@@ -247,13 +248,25 @@ select {
   background: rgba(91, 141, 239, 0.06);
 }
 
+/*
+ * The dropzone is a <label for="..."> wrapping this input, so any click on
+ * the visible label content natively activates the input. Deliberately NOT
+ * an opacity:0 overlay covering the whole zone — Chromium's anti-clickjacking
+ * heuristic silently refuses to open the file picker for a raw click landing
+ * on a fully transparent <input type="file">, even though it's the topmost
+ * element per CSS hit-testing. Visually hiding it off to the side (rather
+ * than covering) keeps clicks landing on the label, which Chromium exempts.
+ */
 .dropzone-input {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  cursor: pointer;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .dropzone-hint {

@@ -32,10 +32,19 @@ uploaded.
    verifies or it doesn't, so "wrong passphrase" and "not a stego image at
    all" are indistinguishable to anyone without the passphrase.
 4. **Hide** — A WebGL2 fragment shader renders a procedural Voronoi/fractal
-   image sized to have enough pixels to carry the packet. Each byte of the
-   packet is spread one bit per Red/Green/Blue channel via LSB matching
-   (±1 embedding, see "Adaptive mode" below for why) rather than direct bit
-   replacement, which is visually imperceptible either way. The alpha
+   image sized to have enough pixels to carry the packet. Only the small
+   fixed header (length, salt, IV) is written sequentially, starting at
+   pixel 0 — it has to be, since finding it is how the decoder learns the
+   salt needed to derive anything else. The ciphertext itself is scattered
+   across the *entire remaining canvas*, in an order set by a Fisher-Yates
+   shuffle seeded from the passphrase and salt (the same mechanism the
+   Adaptive mode uses — see below). Embedding the whole payload
+   sequentially from pixel 0, as earlier versions did, leaves a spatially
+   contiguous block of touched pixels that a windowed/progressive scanner
+   can localize regardless of how individual bits were written; scattering
+   spreads it across the whole image instead. Every written bit — header
+   and ciphertext alike — uses LSB matching (±1 embedding, see "Adaptive
+   mode" below for why) rather than direct bit replacement. The alpha
    channel is left untouched at 255, since browsers premultiply RGB by
    alpha when compositing a drawn image — flipping alpha's LSB would
    silently rescale the RGB channels on redraw and corrupt the hidden bits.
@@ -135,7 +144,7 @@ index.html              How to Use / Encoder / Decoder / Adaptive Encoder / Adap
 css/style.css           Styling
 js/crypto.js            AES-GCM + PBKDF2 + deflate (Web Crypto / Compression Streams API)
 js/filePacking.js       Metadata header packing/unpacking (name + MIME type)
-js/steganography.js     V1 packet framing + sequential LSB embed/extract
+js/steganography.js     V1 header framing + passphrase-scattered LSB-matched embed/extract
 js/steganographyV2.js   V2 header framing + variance-tiered embed/extract orchestration
 js/complexity.js        Per-pixel local variance scoring + percentile tier classification
 js/lsbMatching.js       LSB matching (±1 embedding) for a pixel's low k bits
@@ -155,10 +164,11 @@ rather than a `src/core/crypto.ts`, and the adaptive cost map lives in
 Compression changed what gets encrypted (V1 and V2 alike; gzip → deflate
 too), and both modes' embedding mechanism changed — LSB matching instead of
 direct bit replacement, magic-byte signatures dropped entirely in favor of
-AES-GCM-only validation, and (V2 specifically) pixels rather than individual
-bits as the scatter unit — enough that even the *same* passphrase produces a
-different bit order than before. There's deliberately no version marker to
-signal this cleanly anymore (that's the point — see "Frame" and "Header
+AES-GCM-only validation, and (V2 always, V1 now too) pixels/bits scattered
+across the whole canvas via a passphrase-seeded shuffle instead of written
+sequentially from pixel 0 — enough that even the *same* passphrase produces
+a different bit order than before. There's deliberately no version marker
+to signal this cleanly anymore (that's the point — see "Frame" and "Header
 transport" above): a stale image just fails AES-GCM authentication like any
 other wrong-passphrase or non-stego image would. Images produced by earlier
 versions of this app are not decodable by the current one, in either mode.

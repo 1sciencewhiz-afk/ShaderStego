@@ -1,6 +1,6 @@
 import { encryptBytes, decryptBytes } from './crypto.js';
 import { packPayload, unpackPayload } from './filePacking.js';
-import { buildPacket, computeCanvasDimensions, embedPacket, extractPacket } from './steganography.js';
+import { HEADER_SIZE, computeCanvasDimensions, embedPacket, extractPacket } from './steganography.js';
 import { renderShaderCanvas } from './shaderRenderer.js';
 import { renderTierOverlay } from './complexity.js';
 import { scoreCarrier, buildAnalysis, embedAdaptive, extractAdaptive } from './steganographyV2.js';
@@ -235,9 +235,8 @@ encodeButton.addEventListener('click', async () => {
 
     setStatus(encodeStatus, 'Encrypting data...', 'info');
     const { salt, iv, ciphertext } = await encryptBytes(packed, password);
-    const packet = buildPacket(salt, iv, ciphertext);
 
-    const { width, height } = computeCanvasDimensions(packet.length);
+    const { width, height } = computeCanvasDimensions(HEADER_SIZE + ciphertext.length);
     if (width > MAX_CANVAS_DIMENSION || height > MAX_CANVAS_DIMENSION) {
       throw new Error(
         `This payload needs a ${width}x${height} carrier, past the practical ` +
@@ -250,7 +249,8 @@ encodeButton.addEventListener('click', async () => {
     const ctx = canvas.getContext('2d');
 
     const imageData = ctx.getImageData(0, 0, width, height);
-    embedPacket(imageData, packet);
+    setStatus(encodeStatus, 'Scattering payload across the carrier...', 'info');
+    await embedPacket(imageData, salt, iv, ciphertext, password);
     ctx.putImageData(imageData, 0, 0);
 
     encodePreview.src = canvas.toDataURL('image/png');
@@ -334,7 +334,7 @@ decodeButton.addEventListener('click', async () => {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
     setStatus(decodeStatus, 'Extracting hidden payload...', 'info');
-    const { salt, iv, ciphertext } = extractPacket(imageData);
+    const { salt, iv, ciphertext } = await extractPacket(imageData, password);
 
     setStatus(decodeStatus, 'Decrypting...', 'info');
     const packed = await decryptBytes(ciphertext, password, salt, iv);

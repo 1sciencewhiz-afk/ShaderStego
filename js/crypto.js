@@ -35,37 +35,46 @@ async function deriveKey(passphrase, salt, usage) {
 }
 
 /**
- * Encrypt plaintext with a passphrase, generating a fresh random salt and IV.
- * @param {string} plaintext
+ * Encrypt raw bytes with a passphrase, generating a fresh random salt and IV.
+ * This is the core binary primitive — text and packed-file payloads both
+ * funnel through here as plain Uint8Array data.
+ * @param {Uint8Array} plaintextBytes
  * @param {string} passphrase
  * @returns {Promise<{salt: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array}>}
  */
-export async function encryptText(plaintext, passphrase) {
+export async function encryptBytes(plaintextBytes, passphrase) {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
   const key = await deriveKey(passphrase, salt, 'encrypt');
 
-  const ciphertextBuffer = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    new TextEncoder().encode(plaintext)
-  );
+  const ciphertextBuffer = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plaintextBytes);
 
   return { salt, iv, ciphertext: new Uint8Array(ciphertextBuffer) };
 }
 
 /**
- * Decrypt a ciphertext given the passphrase, salt, and IV used to encrypt it.
- * Throws if the passphrase is wrong or the data has been tampered with
- * (AES-GCM authentication failure).
+ * Decrypt a ciphertext given the passphrase, salt, and IV used to encrypt it,
+ * returning the raw plaintext bytes. Throws if the passphrase is wrong or
+ * the data has been tampered with (AES-GCM authentication failure).
  * @param {Uint8Array} ciphertext
  * @param {string} passphrase
  * @param {Uint8Array} salt
  * @param {Uint8Array} iv
- * @returns {Promise<string>}
+ * @returns {Promise<Uint8Array>}
  */
-export async function decryptToText(ciphertext, passphrase, salt, iv) {
+export async function decryptBytes(ciphertext, passphrase, salt, iv) {
   const key = await deriveKey(passphrase, salt, 'decrypt');
   const plaintextBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
-  return new TextDecoder().decode(plaintextBuffer);
+  return new Uint8Array(plaintextBuffer);
+}
+
+/** Convenience wrapper: encrypt a UTF-8 string via encryptBytes. */
+export async function encryptText(plaintext, passphrase) {
+  return encryptBytes(new TextEncoder().encode(plaintext), passphrase);
+}
+
+/** Convenience wrapper: decrypt to a UTF-8 string via decryptBytes. */
+export async function decryptToText(ciphertext, passphrase, salt, iv) {
+  const plaintextBytes = await decryptBytes(ciphertext, passphrase, salt, iv);
+  return new TextDecoder().decode(plaintextBytes);
 }

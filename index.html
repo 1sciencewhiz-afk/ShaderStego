@@ -10,7 +10,7 @@
   <div class="app">
     <header class="app-header">
       <h1>ShaderStego</h1>
-      <p class="tagline">Hide encrypted text inside a procedurally generated shader image.</p>
+      <p class="tagline">Hide encrypted text or any file inside a procedurally generated shader image.</p>
     </header>
 
     <nav class="tabs">
@@ -24,6 +24,19 @@
       <section id="encode-panel" class="tab-panel active">
         <label for="encode-text">Text to hide</label>
         <textarea id="encode-text" rows="8" placeholder="Enter the text or source code you want to hide..."></textarea>
+
+        <p class="section-hint">— or attach any file (PDF, ZIP, MP3, EXE, ...) to hide instead of the text above —</p>
+
+        <div id="encode-dropzone" class="dropzone">
+          <input id="encode-file" type="file" class="dropzone-input" />
+          <p class="dropzone-hint">Drag &amp; drop a file here, or click to browse</p>
+        </div>
+        <div id="encode-file-info" class="file-info hidden">
+          <span id="encode-file-name"></span>
+          <span id="encode-file-size"></span>
+          <button type="button" id="encode-file-clear" class="clear-file-button">Remove</button>
+        </div>
+        <p id="encode-capacity-hint" class="capacity-hint hidden"></p>
 
         <label for="encode-password">Passphrase</label>
         <input id="encode-password" type="password" placeholder="Enter a strong passphrase" />
@@ -45,8 +58,13 @@
         <button id="decode-button" class="primary-button">Decrypt Image</button>
         <p id="decode-status" class="status"></p>
 
-        <label for="decode-output">Extracted plaintext</label>
+        <label for="decode-output" id="decode-output-label">Extracted plaintext</label>
         <textarea id="decode-output" rows="8" readonly placeholder="Decrypted text will appear here..."></textarea>
+
+        <div id="decode-file-result" class="file-result hidden">
+          <p id="decode-file-result-info"></p>
+          <a id="decode-download-link" class="download-link">Download Extracted File</a>
+        </div>
       </section>
 
       <section id="adaptive-encode-panel" class="tab-panel">
@@ -88,6 +106,19 @@
         <label for="adaptive-encode-text">Text to hide</label>
         <textarea id="adaptive-encode-text" rows="6" placeholder="Enter the text or source code you want to hide..."></textarea>
 
+        <p class="section-hint">— or attach any file (PDF, ZIP, MP3, EXE, ...) to hide instead of the text above —</p>
+
+        <div id="adaptive-encode-dropzone" class="dropzone">
+          <input id="adaptive-encode-file" type="file" class="dropzone-input" />
+          <p class="dropzone-hint">Drag &amp; drop a file here, or click to browse</p>
+        </div>
+        <div id="adaptive-encode-file-info" class="file-info hidden">
+          <span id="adaptive-encode-file-name"></span>
+          <span id="adaptive-encode-file-size"></span>
+          <button type="button" id="adaptive-encode-file-clear" class="clear-file-button">Remove</button>
+        </div>
+        <p id="adaptive-encode-capacity-hint" class="capacity-hint hidden"></p>
+
         <label for="adaptive-encode-password">Passphrase</label>
         <input id="adaptive-encode-password" type="password" placeholder="Enter a strong passphrase" />
 
@@ -110,8 +141,13 @@
 
         <canvas id="adaptive-decode-visualizer" class="preview hidden"></canvas>
 
-        <label for="adaptive-decode-output">Extracted plaintext</label>
+        <label for="adaptive-decode-output" id="adaptive-decode-output-label">Extracted plaintext</label>
         <textarea id="adaptive-decode-output" rows="8" readonly placeholder="Decrypted text will appear here..."></textarea>
+
+        <div id="adaptive-decode-file-result" class="file-result hidden">
+          <p id="adaptive-decode-file-result-info"></p>
+          <a id="adaptive-decode-download-link" class="download-link">Download Extracted File</a>
+        </div>
       </section>
     </main>
 

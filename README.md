@@ -23,28 +23,35 @@ uploaded.
    zlib-framing overhead. The key is derived from your passphrase using
    PBKDF2-SHA256 (250,000 iterations) with a random 16-byte salt. A random
    12-byte IV is generated per encryption.
-3. **Frame** — The salt, IV, and ciphertext are packed behind a small outer
-   header (`'STEG'` magic bytes + ciphertext length) so the decoder can find
-   and size everything it needs.
+3. **Frame** — The ciphertext length, salt, and IV are packed behind a small
+   outer header so the decoder can find and size everything it needs.
+   Deliberately no magic-byte signature: earlier versions led with a literal
+   ASCII tag at a fixed, fully predictable location, which is exactly what a
+   basic signature-scanning steganalysis tool checks for first. Validity
+   now rests entirely on AES-GCM's own authentication tag — it either
+   verifies or it doesn't, so "wrong passphrase" and "not a stego image at
+   all" are indistinguishable to anyone without the passphrase.
 4. **Hide** — A WebGL2 fragment shader renders a procedural Voronoi/fractal
    image sized to have enough pixels to carry the packet. Each byte of the
-   packet is spread one bit per Red/Green/Blue channel (the least significant
-   bit), which is visually imperceptible. The alpha channel is left untouched
-   at 255, since browsers premultiply RGB by alpha when compositing a drawn
-   image — flipping alpha's LSB would silently rescale the RGB channels on
-   redraw and corrupt the hidden bits. The Encoder shows a live capacity hint
-   and rejects payloads that would need an impractically large carrier
-   (past 4096x4096px).
+   packet is spread one bit per Red/Green/Blue channel via LSB matching
+   (±1 embedding, see "Adaptive mode" below for why) rather than direct bit
+   replacement, which is visually imperceptible either way. The alpha
+   channel is left untouched at 255, since browsers premultiply RGB by
+   alpha when compositing a drawn image — flipping alpha's LSB would
+   silently rescale the RGB channels on redraw and corrupt the hidden bits.
+   The Encoder shows a live capacity hint and rejects payloads that would
+   need an impractically large carrier (past 4096x4096px).
 5. **Export** — The result is exported as a lossless PNG (JPEG would destroy
    the hidden bits through lossy compression).
 6. **Decode** — Uploading the PNG re-reads its raw pixel buffer via
    `getImageData()`, pulls the bits back into bytes, decrypts them with your
    passphrase, and unpacks the metadata header. Wrong passphrase or corrupted
-   data fails the AES-GCM authentication check and is reported as an error.
-   If the recovered metadata's MIME type starts with `text/`, the payload is
-   shown as text; otherwise it's wrapped in a `Blob` with the original MIME
-   type, handed an object URL, and offered as a "Download Extracted File"
-   button that preserves the original name and extension.
+   data fails the AES-GCM authentication check and is reported as an error —
+   the same generic error a non-stego image gets, on purpose. If the
+   recovered metadata's MIME type starts with `text/`, the payload is shown
+   as text; otherwise it's wrapped in a `Blob` with the original MIME type,
+   handed an object URL, and offered as a "Download Extracted File" button
+   that preserves the original name and extension.
 
 ## Hiding a file instead of text
 
@@ -106,11 +113,15 @@ statistically hardest to fingerprint.
   even by an attacker who reproduces the variance analysis exactly. This
   is defense-in-depth against structural/blind steganalysis on top of, not
   instead of, AES-GCM secrecy.
-- **Header transport** — a small fixed header (`'STEGV3'` magic, salt, IV,
-  variance window radius, the two percentile thresholds, ciphertext length)
-  is written one bit per pixel (blue channel, LSB matching) into the
-  image's leading pixels; those pixels are always excluded from the
-  variance cost map so the two regions never collide.
+- **Header transport** — a small fixed header (salt, IV, variance window
+  radius, the two percentile thresholds, ciphertext length — no magic-byte
+  signature, for the same signature-scanning reason as V1 above) is written
+  one bit per pixel (blue channel, LSB matching) into the image's leading
+  pixels; those pixels are always excluded from the variance cost map so
+  the two regions never collide. A header whose window radius or
+  percentiles fall outside the only values this app ever writes is
+  rejected up front as implausible, without revealing whether that's
+  because it's not a stego image or because the passphrase is wrong.
 - **UI** — the Complexity Visualizer overlays each pixel's tier (amber for
   1 bit, green for 2 bits, gray for the header-reserved region, untouched
   for 0 bits) on the carrier; the Capacity Meter shows the 0/1/2-bit pixel
@@ -142,15 +153,15 @@ rather than a `src/core/crypto.ts`, and the adaptive cost map lives in
 ## Compatibility note
 
 Compression changed what gets encrypted (V1 and V2 alike; gzip → deflate
-too), and V2's embedding mechanism changed enough — LSB matching instead of
-direct bit replacement, and pixels (not individual bits) as the scatter
-unit — to produce a different bit order even from the *same* passphrase
-and seed. The magic bytes are bumped each time this happens
-(`'STEGV2'` → `'STEGV3'` → `'STEGV4'`) specifically so a stale image fails
-fast with a clear "no hidden data found" error instead of silently
-decoding garbage and reporting a confusing "wrong passphrase." Images
-produced by earlier versions of this app are not decodable by the current
-one, in either mode.
+too), and both modes' embedding mechanism changed — LSB matching instead of
+direct bit replacement, magic-byte signatures dropped entirely in favor of
+AES-GCM-only validation, and (V2 specifically) pixels rather than individual
+bits as the scatter unit — enough that even the *same* passphrase produces a
+different bit order than before. There's deliberately no version marker to
+signal this cleanly anymore (that's the point — see "Frame" and "Header
+transport" above): a stale image just fails AES-GCM authentication like any
+other wrong-passphrase or non-stego image would. Images produced by earlier
+versions of this app are not decodable by the current one, in either mode.
 
 ## Running locally
 

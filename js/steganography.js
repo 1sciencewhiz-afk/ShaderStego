@@ -2,31 +2,46 @@
 // Only the R, G, B channel LSBs are used (see CHANNELS_PER_PIXEL below); alpha
 // is left untouched to avoid premultiplied-alpha rounding on redraw.
 //
+// No magic bytes: an earlier version of this format led with a literal
+// ASCII 'STEG' signature at a fixed, fully predictable location (pixel 0
+// onward) — trivial for a signature-scanning steganalysis tool to flag,
+// independent of the passphrase. Validity is now established the only way
+// that doesn't leak anything: AES-GCM's own authentication tag either
+// verifies or it doesn't. A bounds check on the declared ciphertext length
+// still guards against reading garbage off a non-stego image; beyond that,
+// "wrong passphrase" and "not a stego image at all" are deliberately
+// indistinguishable to the caller.
+//
+// Every bit is written via LSB matching (±1), not direct bit replacement:
+// replacement always turns an even channel value into itself-or-odd+1,
+// never odd-1, which is exactly the asymmetry the classic chi-square
+// steganalysis attack tests for. Each R/G/B channel byte carries at most
+// one independently-matched bit, so — unlike the adaptive (V2) scheme's
+// 2-bit pixels — there's no carry-coordination concern between slots.
+//
 // Packet layout (all multi-byte fields big-endian):
-//   [0:4]   Magic bytes 'STEG'
-//   [4:8]   uint32 ciphertext length (bytes)
-//   [8:24]  Salt (16 bytes)
-//   [24:36] IV (12 bytes)
-//   [36:]   Ciphertext (variable length)
+//   [0:4]  uint32 ciphertext length (bytes)
+//   [4:20] Salt (16 bytes)
+//   [20:32] IV (12 bytes)
+//   [32:]  Ciphertext (variable length)
 
 import { SALT_LENGTH, IV_LENGTH } from './crypto.js';
+import { matchValueToBits, readBits } from './lsbMatching.js';
 
-const MAGIC = [0x53, 0x54, 0x45, 0x47]; // 'S','T','E','G'
 const LENGTH_FIELD_SIZE = 4;
-export const HEADER_SIZE = MAGIC.length + LENGTH_FIELD_SIZE + SALT_LENGTH + IV_LENGTH; // 36 bytes
+export const HEADER_SIZE = LENGTH_FIELD_SIZE + SALT_LENGTH + IV_LENGTH; // 32 bytes
 
 /**
  * Build the full byte packet (header + ciphertext) to be hidden in the image.
  */
 export function buildPacket(salt, iv, ciphertext) {
   const packet = new Uint8Array(HEADER_SIZE + ciphertext.length);
-  packet.set(MAGIC, 0);
 
   const view = new DataView(packet.buffer);
-  view.setUint32(MAGIC.length, ciphertext.length, false);
+  view.setUint32(0, ciphertext.length, false);
 
-  packet.set(salt, MAGIC.length + LENGTH_FIELD_SIZE);
-  packet.set(iv, MAGIC.length + LENGTH_FIELD_SIZE + SALT_LENGTH);
+  packet.set(salt, LENGTH_FIELD_SIZE);
+  packet.set(iv, LENGTH_FIELD_SIZE + SALT_LENGTH);
   packet.set(ciphertext, HEADER_SIZE);
 
   return packet;
@@ -42,6 +57,10 @@ function channelDataIndex(bitIndex) {
   const pixel = Math.floor(bitIndex / CHANNELS_PER_PIXEL);
   const channel = bitIndex % CHANNELS_PER_PIXEL; // 0=R, 1=G, 2=B
   return pixel * 4 + channel;
+}
+
+function randomBool() {
+  return Math.random() < 0.5;
 }
 
 /**
@@ -74,7 +93,7 @@ export function embedPacket(imageData, packet) {
     for (let bit = 7; bit >= 0; bit--) {
       const bitValue = (byte >> bit) & 1;
       const dataIndex = channelDataIndex(bitIndex);
-      data[dataIndex] = (data[dataIndex] & 0xfe) | bitValue;
+      data[dataIndex] = matchValueToBits(data[dataIndex], bitValue, 1, randomBool());
       bitIndex++;
     }
   }
@@ -86,7 +105,7 @@ function extractBytes(data, startBitIndex, numBytes) {
   for (let i = 0; i < numBytes; i++) {
     let byte = 0;
     for (let bit = 0; bit < 8; bit++) {
-      byte = (byte << 1) | (data[channelDataIndex(bitIndex)] & 1);
+      byte = (byte << 1) | readBits(data[channelDataIndex(bitIndex)], 1);
       bitIndex++;
     }
     out[i] = byte;
@@ -95,8 +114,11 @@ function extractBytes(data, startBitIndex, numBytes) {
 }
 
 /**
- * Extract and validate the hidden packet from `imageData`.
- * Returns { salt, iv, ciphertext }. Throws if no valid packet is found.
+ * Extract the hidden packet from `imageData`. Returns { salt, iv,
+ * ciphertext } based purely on the declared length field and a capacity
+ * bounds check — there's no signature to validate against, so a wrong
+ * passphrase and "not a stego image" both surface identically, only once
+ * AES-GCM decryption is attempted by the caller.
  */
 export function extractPacket(imageData) {
   const data = imageData.data;
@@ -106,13 +128,7 @@ export function extractPacket(imageData) {
     throw new Error('Image is too small to contain a hidden payload.');
   }
 
-  const magicBytes = extractBytes(data, 0, MAGIC.length);
-  const magicOk = MAGIC.every((byte, i) => magicBytes[i] === byte);
-  if (!magicOk) {
-    throw new Error('No hidden data found in this image (magic bytes mismatch).');
-  }
-
-  let offsetBytes = MAGIC.length;
+  let offsetBytes = 0;
   const lengthBytes = extractBytes(data, offsetBytes * 8, LENGTH_FIELD_SIZE);
   const ciphertextLength = new DataView(lengthBytes.buffer).getUint32(0, false);
   offsetBytes += LENGTH_FIELD_SIZE;
@@ -125,7 +141,7 @@ export function extractPacket(imageData) {
 
   const totalBitsNeeded = (offsetBytes + ciphertextLength) * 8;
   if (totalBitsNeeded > capacityBits) {
-    throw new Error('Hidden payload appears truncated or corrupted.');
+    throw new Error('No hidden data found in this image, or the file is corrupted.');
   }
 
   const ciphertext = extractBytes(data, offsetBytes * 8, ciphertextLength);

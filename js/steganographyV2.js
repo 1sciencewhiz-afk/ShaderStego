@@ -33,22 +33,28 @@
 // Capacity is therefore scattered per *pixel*, each contributing 1 or 2
 // bits of payload consumed atomically.
 //
+// No magic bytes: a literal ASCII signature at a fixed, fully predictable
+// location is trivial for a signature-scanning steganalysis tool to flag,
+// independent of the passphrase — see steganography.js (V1) for the same
+// reasoning. Header validity is instead a bounds/plausibility check on the
+// fields themselves (window radius, percentiles, declared length), and the
+// real gate is AES-GCM's authentication tag: it either verifies or it
+// doesn't, so "wrong passphrase" and "not a stego image" look the same.
+//
 // Header fields (big-endian):
-//   [0:6]   Magic 'STEGV4'
-//   [6:22]  Salt (16 bytes)
-//   [22:34] IV (12 bytes)
-//   [34:35] Variance window radius in pixels (1 byte)
-//   [35:36] Low variance percentile (1 byte, 0-100)
-//   [36:37] High variance percentile (1 byte, 0-100)
-//   [37:41] Ciphertext length in bytes (uint32)
+//   [0:16]  Salt (16 bytes)
+//   [16:28] IV (12 bytes)
+//   [28:29] Variance window radius in pixels (1 byte)
+//   [29:30] Low variance percentile (1 byte, 0-100)
+//   [30:31] High variance percentile (1 byte, 0-100)
+//   [31:35] Ciphertext length in bytes (uint32)
 
 import { SALT_LENGTH, IV_LENGTH } from './crypto.js';
 import { computeReservedPixelCount, computeVarianceMap, classifyTiers } from './complexity.js';
 import { deriveSeed, shuffleWithSeed } from './prng.js';
 import { matchValueToBits, readBits } from './lsbMatching.js';
 
-const MAGIC = [0x53, 0x54, 0x45, 0x47, 0x56, 0x34]; // 'STEGV4'
-const FIXED_HEADER_SIZE = MAGIC.length + SALT_LENGTH + IV_LENGTH + 1 + 1 + 1 + 4; // 41
+const FIXED_HEADER_SIZE = SALT_LENGTH + IV_LENGTH + 1 + 1 + 1 + 4; // 35
 
 const BLUE_OFFSET = 2;
 
@@ -98,11 +104,10 @@ function readHeaderBytes(data, numBytes) {
 
 function buildFixedHeader(salt, iv, windowRadius, lowPercentile, highPercentile, ciphertextLength) {
   const header = new Uint8Array(FIXED_HEADER_SIZE);
-  header.set(MAGIC, 0);
-  header.set(salt, MAGIC.length);
-  header.set(iv, MAGIC.length + SALT_LENGTH);
+  header.set(salt, 0);
+  header.set(iv, SALT_LENGTH);
 
-  let offset = MAGIC.length + SALT_LENGTH + IV_LENGTH;
+  let offset = SALT_LENGTH + IV_LENGTH;
   header[offset] = windowRadius;
   header[offset + 1] = lowPercentile;
   header[offset + 2] = highPercentile;
@@ -113,15 +118,14 @@ function buildFixedHeader(salt, iv, windowRadius, lowPercentile, highPercentile,
   return header;
 }
 
-function parseFixedHeader(bytes) {
-  const magicOk = MAGIC.every((b, i) => bytes[i] === b);
-  if (!magicOk) {
-    throw new Error('No adaptive hidden data found in this image (magic bytes mismatch).');
-  }
-  const salt = bytes.slice(MAGIC.length, MAGIC.length + SALT_LENGTH);
-  const iv = bytes.slice(MAGIC.length + SALT_LENGTH, MAGIC.length + SALT_LENGTH + IV_LENGTH);
+/** Generic message for any header that doesn't look plausible — deliberately not more specific. */
+const NO_DATA_ERROR = 'No adaptive hidden data found in this image, or the file is corrupted.';
 
-  let offset = MAGIC.length + SALT_LENGTH + IV_LENGTH;
+function parseFixedHeader(bytes) {
+  const salt = bytes.slice(0, SALT_LENGTH);
+  const iv = bytes.slice(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
+
+  let offset = SALT_LENGTH + IV_LENGTH;
   const windowRadius = bytes[offset];
   const lowPercentile = bytes[offset + 1];
   const highPercentile = bytes[offset + 2];
@@ -129,6 +133,18 @@ function parseFixedHeader(bytes) {
 
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const ciphertextLength = view.getUint32(offset, false);
+
+  // Plausibility bounds in place of a magic-byte signature: these are the
+  // only values this app ever writes, so anything outside them means this
+  // isn't (or is no longer) a valid adaptive stego image.
+  if (
+    (windowRadius !== 1 && windowRadius !== 2) ||
+    lowPercentile > 100 ||
+    highPercentile > 100 ||
+    lowPercentile > highPercentile
+  ) {
+    throw new Error(NO_DATA_ERROR);
+  }
 
   return { salt, iv, windowRadius, lowPercentile, highPercentile, ciphertextLength };
 }

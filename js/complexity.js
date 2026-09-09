@@ -6,27 +6,28 @@
 // detectable, while smooth regions (the areas most vulnerable to
 // steganalysis) are left completely untouched.
 //
-// Only the blue channel is ever modified, and variance is always computed
-// from data the embedding step never touches: full-precision red/green,
-// and the top 6 bits of blue (`& 0xFC`), since a "2 bits" pixel can have
-// blue's bottom two bits rewritten. That makes the cost map provably
-// identical whether computed on a clean carrier or a stego image, so it
-// never needs to be transmitted — only the two percentile thresholds that
-// parameterize it (a couple of bytes) go in the header.
+// Only the blue channel is ever modified, and variance is computed from
+// red and green *only* — blue never contributes, at all. This isn't just
+// "the untouched high bits of blue": embedding uses LSB matching (±1),
+// which nudges the channel value up or down, and that arithmetic can carry
+// into bits well above the ones nominally targeted (e.g. blue value 3 -> 4
+// to fix its low 2 bits flips bit 2 as a side effect). No masking scheme
+// over blue is safe against that, so blue is simply excluded — which makes
+// the cost map provably identical whether computed on a clean carrier or a
+// stego image, so it never needs to be transmitted; only the two
+// percentile thresholds that parameterize it (a couple of bytes) go in the
+// header.
 
-function luminance(r, g, bMasked) {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * bMasked;
+function luminance(r, g) {
+  return 0.2126 * r + 0.7152 * g;
 }
 
-/**
- * Build a luminance map using full-precision R/G and blue with its bottom
- * two bits cleared, so the map is unaffected by any prior 2-bit embedding.
- */
+/** Build a luminance map from red and green only — blue is never read here (see header comment). */
 function buildLuminanceMap(imageData) {
   const { data, width, height } = imageData;
   const lum = new Float32Array(width * height);
   for (let i = 0, p = 0; p < width * height; i += 4, p++) {
-    lum[p] = luminance(data[i], data[i + 1], data[i + 2] & 0xfc);
+    lum[p] = luminance(data[i], data[i + 1]);
   }
   return lum;
 }

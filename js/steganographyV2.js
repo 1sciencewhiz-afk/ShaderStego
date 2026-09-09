@@ -1,23 +1,40 @@
 // V2 adaptive steganography: orchestrates the variance cost map
-// (complexity.js) and passphrase-seeded permutation (prng.js) around the
-// same AES-GCM(+gzip) payload crypto.js already provides.
+// (complexity.js), passphrase-seeded permutation (prng.js), and LSB
+// matching (lsbMatching.js) around the same AES-GCM(+deflate) payload
+// crypto.js already provides.
 //
 // Layout inside the image:
 //   1. A "header region" — the first N pixels in raster order — holds the
-//      fixed header fields via plain sequential LSB (1 bit per pixel, blue
-//      channel only). This must be readable without knowing anything else
-//      about the image, so it never depends on variance analysis or the
+//      fixed header fields via plain sequential blue-channel LSB matching.
+//      This must be readable without knowing anything else about the
+//      image, so it never depends on variance analysis or the
 //      passphrase-derived permutation.
-//   2. The ciphertext is embedded into the blue-channel LSB (and, for
-//      2-bit pixels, LSB+1) of every pixel the variance cost map allocates
-//      capacity to — outside the header region — in an order scattered by
-//      a Fisher-Yates shuffle seeded from the passphrase and salt. Without
-//      the correct passphrase, the scatter order (and hence which bits are
-//      the payload) is unrecoverable even if the variance map itself is
-//      re-derived.
+//   2. The ciphertext is embedded into the blue channel of every pixel the
+//      variance cost map allocates capacity to — outside the header
+//      region — in an order scattered by a Fisher-Yates shuffle seeded
+//      from the passphrase and salt. Without the correct passphrase, the
+//      scatter order (and hence which bits are the payload) is
+//      unrecoverable even if the variance map itself is re-derived.
+//
+// Every write (header and payload alike) goes through LSB matching
+// (±1 embedding) rather than direct bit replacement: a pixel whose low
+// bits already match the target is left untouched, and one that doesn't
+// is nudged up or down by the smallest amount that fixes it, picking the
+// direction at random on ties. Direct bit replacement always turns an even
+// channel value into itself-or-odd+1, never odd-1 — a asymmetry the classic
+// chi-square steganalysis attack specifically tests for. LSB matching
+// removes that asymmetry.
+//
+// A 2-bit ("high detail") pixel's two bits are always written and read
+// together as a single 2-bit target, not as two independent bit slots:
+// LSB matching can carry a value across a bit boundary (e.g. 0b011 -> 0b100
+// to flip just the low bit), so writing a pixel's two bits at unrelated
+// times during the scatter could let a later write clobber an earlier one.
+// Capacity is therefore scattered per *pixel*, each contributing 1 or 2
+// bits of payload consumed atomically.
 //
 // Header fields (big-endian):
-//   [0:6]   Magic 'STEGV3'
+//   [0:6]   Magic 'STEGV4'
 //   [6:22]  Salt (16 bytes)
 //   [22:34] IV (12 bytes)
 //   [34:35] Variance window radius in pixels (1 byte)
@@ -28,14 +45,15 @@
 import { SALT_LENGTH, IV_LENGTH } from './crypto.js';
 import { computeReservedPixelCount, computeVarianceMap, classifyTiers } from './complexity.js';
 import { deriveSeed, shuffleWithSeed } from './prng.js';
+import { matchValueToBits, readBits } from './lsbMatching.js';
 
-const MAGIC = [0x53, 0x54, 0x45, 0x47, 0x56, 0x33]; // 'STEGV3'
+const MAGIC = [0x53, 0x54, 0x45, 0x47, 0x56, 0x34]; // 'STEGV4'
 const FIXED_HEADER_SIZE = MAGIC.length + SALT_LENGTH + IV_LENGTH + 1 + 1 + 1 + 4; // 41
 
 const BLUE_OFFSET = 2;
 
-function headerSlot(pixelIndex) {
-  return pixelIndex * 4 + BLUE_OFFSET;
+function randomBool() {
+  return Math.random() < 0.5;
 }
 
 function bytesToBits(bytes) {
@@ -59,11 +77,12 @@ function bitsToBytes(bits) {
   return out;
 }
 
+/** Write `bytes` one bit per pixel (blue channel) via LSB matching, starting at pixel 0. */
 function writeHeaderBytes(data, bytes) {
   const bits = bytesToBits(bytes);
   for (let i = 0; i < bits.length; i++) {
-    const idx = headerSlot(i);
-    data[idx] = (data[idx] & 0xfe) | bits[i];
+    const byteIdx = i * 4 + BLUE_OFFSET;
+    data[byteIdx] = matchValueToBits(data[byteIdx], bits[i], 1, randomBool());
   }
 }
 
@@ -71,7 +90,8 @@ function readHeaderBytes(data, numBytes) {
   const numBits = numBytes * 8;
   const bits = new Array(numBits);
   for (let i = 0; i < numBits; i++) {
-    bits[i] = data[headerSlot(i)] & 1;
+    const byteIdx = i * 4 + BLUE_OFFSET;
+    bits[i] = readBits(data[byteIdx], 1);
   }
   return bitsToBytes(bits);
 }
@@ -113,35 +133,13 @@ function parseFixedHeader(bytes) {
   return { salt, iv, windowRadius, lowPercentile, highPercentile, ciphertextLength };
 }
 
-/**
- * Build the ordered (pre-shuffle) list of capacity slot ids from a tier
- * map: one slot per bit of capacity, in raster order. A slot id encodes
- * (pixelIndex, bitPosition) as `pixelIndex * 2 + bitPosition` (bitPosition
- * 0 = blue LSB, 1 = blue LSB+1).
- */
-function buildCapacitySlots(tiers) {
+/** Ordered (pre-shuffle) list of pixel indices with capacity (tier >= 1), in raster order. */
+function buildPixelSlots(tiers) {
   const slots = [];
   for (let p = 0; p < tiers.length; p++) {
-    const tier = tiers[p];
-    if (tier >= 1) slots.push(p * 2);
-    if (tier === 2) slots.push(p * 2 + 1);
+    if (tiers[p] >= 1) slots.push(p);
   }
   return slots;
-}
-
-function getSlotBit(data, slot) {
-  const pixelIndex = Math.floor(slot / 2);
-  const bitPos = slot % 2;
-  const byteIdx = pixelIndex * 4 + BLUE_OFFSET;
-  return (data[byteIdx] >> bitPos) & 1;
-}
-
-function setSlotBit(data, slot, bitValue) {
-  const pixelIndex = Math.floor(slot / 2);
-  const bitPos = slot % 2;
-  const byteIdx = pixelIndex * 4 + BLUE_OFFSET;
-  const mask = 1 << bitPos;
-  data[byteIdx] = (data[byteIdx] & ~mask) | (bitValue << bitPos);
 }
 
 /**
@@ -220,13 +218,29 @@ export async function embedAdaptive(imageData, salt, iv, ciphertext, passphrase,
   const data = imageData.data;
   writeHeaderBytes(data, fixedHeader);
 
-  const slots = buildCapacitySlots(tiers);
+  const pixelSlots = buildPixelSlots(tiers);
   const seed = await deriveSeed(passphrase, salt);
-  shuffleWithSeed(slots, seed);
+  shuffleWithSeed(pixelSlots, seed);
 
   const bits = bytesToBits(ciphertext);
-  for (let i = 0; i < bits.length; i++) {
-    setSlotBit(data, slots[i], bits[i]);
+  let bitPos = 0;
+  for (let i = 0; i < pixelSlots.length && bitPos < bits.length; i++) {
+    const p = pixelSlots[i];
+    const numBits = tiers[p]; // 1 or 2
+
+    let target = 0;
+    for (let b = 0; b < numBits; b++) {
+      // The last pixel touched may need fewer real bits than its tier
+      // allows; pad the remainder with a random bit so the write is still
+      // a single atomic numBits-wide match. The decoder stops reading
+      // once it has the exact ciphertext length, so padding is never seen.
+      const bit = bitPos < bits.length ? bits[bitPos] : Math.random() < 0.5 ? 1 : 0;
+      target = (target << 1) | bit;
+      bitPos++;
+    }
+
+    const byteIdx = p * 4 + BLUE_OFFSET;
+    data[byteIdx] = matchValueToBits(data[byteIdx], target, numBits, randomBool());
   }
 
   return analysis;
@@ -262,18 +276,25 @@ export async function extractAdaptive(imageData, passphrase) {
     highPercentile
   );
 
-  const slots = buildCapacitySlots(tiers);
+  const pixelSlots = buildPixelSlots(tiers);
   const seed = await deriveSeed(passphrase, salt);
-  shuffleWithSeed(slots, seed);
+  shuffleWithSeed(pixelSlots, seed);
 
   const neededBits = ciphertextLength * 8;
-  if (neededBits > slots.length) {
-    throw new Error('Hidden payload appears truncated or corrupted.');
+  const bits = [];
+  for (let i = 0; i < pixelSlots.length && bits.length < neededBits; i++) {
+    const p = pixelSlots[i];
+    const numBits = tiers[p];
+    const byteIdx = p * 4 + BLUE_OFFSET;
+    const value = readBits(data[byteIdx], numBits);
+
+    for (let b = numBits - 1; b >= 0 && bits.length < neededBits; b--) {
+      bits.push((value >> b) & 1);
+    }
   }
 
-  const bits = new Array(neededBits);
-  for (let i = 0; i < neededBits; i++) {
-    bits[i] = getSlotBit(data, slots[i]);
+  if (bits.length < neededBits) {
+    throw new Error('Hidden payload appears truncated or corrupted.');
   }
   const ciphertext = bitsToBytes(bits);
 

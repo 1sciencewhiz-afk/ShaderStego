@@ -1,9 +1,10 @@
 // AES-GCM encryption with PBKDF2 key derivation, using the Web Crypto API.
-// Payload bytes are gzip-compressed before encryption (and decompressed
+// Payload bytes are deflate-compressed before encryption (and inflated
 // after decryption) via the Compression Streams API, so compressible
 // payloads (text, source code, many document formats) need fewer LSB slots
 // in the carrier image. Already-compressed formats (JPEG, MP3, ZIP) simply
-// pass through with a small (~20-byte) gzip framing overhead.
+// pass through with a small (~6-byte) zlib framing overhead — deflate's
+// zlib wrapper is lighter than gzip's (no filename/mtime/CRC32 header).
 
 export const SALT_LENGTH = 16; // bytes
 export const IV_LENGTH = 12; // bytes, recommended size for AES-GCM
@@ -11,16 +12,16 @@ const PBKDF2_ITERATIONS = 250000;
 
 /** Pipe `bytes` through a Compression/DecompressionStream and collect the result. */
 async function pipeThroughStream(bytes, streamCtor) {
-  const stream = new Blob([bytes]).stream().pipeThrough(new streamCtor('gzip'));
+  const stream = new Blob([bytes]).stream().pipeThrough(new streamCtor('deflate'));
   const buffer = await new Response(stream).arrayBuffer();
   return new Uint8Array(buffer);
 }
 
-async function gzipCompress(bytes) {
+async function deflateCompress(bytes) {
   return pipeThroughStream(bytes, CompressionStream);
 }
 
-async function gzipDecompress(bytes) {
+async function deflateDecompress(bytes) {
   return pipeThroughStream(bytes, DecompressionStream);
 }
 
@@ -63,7 +64,7 @@ async function deriveKey(passphrase, salt, usage) {
  * @returns {Promise<{salt: Uint8Array, iv: Uint8Array, ciphertext: Uint8Array}>}
  */
 export async function encryptBytes(plaintextBytes, passphrase) {
-  const compressed = await gzipCompress(plaintextBytes);
+  const compressed = await deflateCompress(plaintextBytes);
 
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
   const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
@@ -88,5 +89,5 @@ export async function encryptBytes(plaintextBytes, passphrase) {
 export async function decryptBytes(ciphertext, passphrase, salt, iv) {
   const key = await deriveKey(passphrase, salt, 'decrypt');
   const compressedBuffer = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
-  return gzipDecompress(new Uint8Array(compressedBuffer));
+  return deflateDecompress(new Uint8Array(compressedBuffer));
 }

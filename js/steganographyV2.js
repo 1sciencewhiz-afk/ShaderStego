@@ -58,6 +58,33 @@ const FIXED_HEADER_SIZE = SALT_LENGTH + IV_LENGTH + 1 + 1 + 1 + 4; // 35
 
 const BLUE_OFFSET = 2;
 
+// Below roughly this many pixels per side, a progressive chi-square scan
+// gets too few samples per histogram bin to be a stable statistic — the
+// instability is a property of the *detector* reading any channel of a
+// small image, not of what (if anything) was embedded into it (confirmed
+// empirically: even a completely unembedded carrier this small can read
+// as suspicious purely from sampling noise). V1 (steganography.js) uses a
+// 320px floor, but that was verified against carriers it generates
+// itself, which have more varied local texture than a plain low-frequency
+// carrier can. Since V2 also accepts arbitrary user-uploaded carriers —
+// including flat or smoothly-varying images that give this noise mode
+// more room — 512px (matching this app's own procedural default) is the
+// smallest floor that tested reliably clean here.
+const MIN_SIDE = 512;
+
+// Even with LSB matching removing the classic even/odd replacement
+// asymmetry, saturating a large fraction of the variance-selected "high
+// detail" pixels still measurably disturbs the blue channel's value
+// distribution — verified empirically: touching a payload near the raw
+// tier capacity (>~75-80%) on an otherwise-clean 512x512 carrier reads as
+// suspicious, while the same carrier stays clean well under that. Unlike
+// V1 (which controls its own generated carrier size and can dilute touch
+// density by inflating it), V2's carrier is frequently user-supplied, so
+// the margin here is enforced as a hard cap on usable capacity rather
+// than by resizing anything: at most 1/CAPACITY_MARGIN of the
+// variance-identified capacity may actually be used per embed.
+const CAPACITY_MARGIN = 4;
+
 function randomBool() {
   return Math.random() < 0.5;
 }
@@ -189,6 +216,10 @@ export function buildAnalysis(scored, lowPercentile, highPercentile) {
 
   const capacityBits = tierCounts[1] * 1 + tierCounts[2] * 2;
   const sequentialCapacityBits = width * height * 3; // reference: plain 1-bit R/G/B LSB
+  // The capacity a payload may actually use (see CAPACITY_MARGIN above) —
+  // distinct from capacityBits, which is the raw, undiluted tier-map total
+  // and is still reported for the visualizer/meter's "theoretical" figures.
+  const safeCapacityBits = Math.floor(capacityBits / CAPACITY_MARGIN);
 
   return {
     width,
@@ -203,6 +234,7 @@ export function buildAnalysis(scored, lowPercentile, highPercentile) {
     tierCounts,
     totalPixels: width * height,
     capacityBits,
+    safeCapacityBits,
     sequentialCapacityBits,
   };
 }
@@ -219,13 +251,23 @@ export function analyzeCarrier(imageData, windowRadius, lowPercentile, highPerce
  * whatever the UI last showed the user.
  */
 export async function embedAdaptive(imageData, salt, iv, ciphertext, passphrase, analysis) {
-  const { windowRadius, lowPercentile, highPercentile, tiers, capacityBits } = analysis;
+  const { width, height, windowRadius, lowPercentile, highPercentile, tiers, capacityBits, safeCapacityBits } =
+    analysis;
+
+  if (width < MIN_SIDE || height < MIN_SIDE) {
+    throw new Error(
+      `Carrier image is ${width}x${height}, below the ${MIN_SIDE}x${MIN_SIDE} minimum this app enforces — ` +
+        `smaller images give a steganalysis chi-square scan too few samples per histogram bin to be reliable, ` +
+        `which can flag even a hidden payload as suspicious purely from that noise. Use a larger carrier.`
+    );
+  }
 
   const payloadBits = ciphertext.length * 8;
-  if (payloadBits > capacityBits) {
+  if (payloadBits > safeCapacityBits) {
     throw new Error(
-      `Payload needs ${payloadBits} bits but only ${capacityBits} bits are available ` +
-        `at the current variance thresholds. Lower the thresholds or use a larger/more textured image.`
+      `Payload needs ${payloadBits} bits but only ${safeCapacityBits} bits can safely be used ` +
+        `(of ${capacityBits} bits identified) at the current variance thresholds — using more risks a ` +
+        `detectable statistical signature. Lower the thresholds, use a larger/more textured image, or a smaller file.`
     );
   }
 

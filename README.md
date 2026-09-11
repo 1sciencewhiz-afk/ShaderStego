@@ -182,15 +182,58 @@ statistically hardest to fingerprint.
   reference.
 
 Because red and green are never touched at all, a per-channel pairs-of-values
-chi-square test reading either channel should see nothing. Reading blue (or
-a grayscale value derived from it) is a different story: unlike V1, nothing
-here enforces a capacity margin — the touch density on blue is whatever the
-variance thresholds and payload size happen to produce, and could run high
-for a large payload on a small or mostly-smooth carrier. This wasn't
-separately reasoned through or checked against a chi-square test the way
-V1's margin above was (see that section's caveat on verification, too) — a
-larger, more textured carrier and a higher smooth-region cutoff give more
-pixels for the payload to spread across if this matters for a given use.
+chi-square test reading either channel sees nothing from the embedding itself
+(it can still occasionally read high on its own, purely from sampling noise —
+see the floor discussion below). Reading blue (or a grayscale value derived
+from it) is where the payload actually lives, and — unlike red/green — this
+was checked, not just reasoned through: a Node-only stress harness embedded
+payloads across a spread of carrier sizes (128px to 1024px), percentile
+threshold settings (default 40/75, aggressive 90/98, loose 0/50), and fill
+levels (from light to as near the tier-identified capacity as the code would
+allow) and ran the detector's own verbatim chi-square code against the
+result. Before any fix, this found real, large detections: near-capacity
+payloads on an otherwise-clean 512x512 carrier reached 90.8% on blue, and a
+256x256 carrier reached 95.6% even at a modest 8.4% fill — both far past the
+35% "suspicious" cutoff, and analogous to what V1 had before its own margin
+and floor above.
+
+Two changes fixed this, both enforced in `embedAdaptive` itself (an embed
+call throws rather than silently producing a detectable image):
+
+- **A hard cap on usable capacity** — at most one quarter of the
+  variance-identified capacity (`CAPACITY_MARGIN = 4` in
+  `js/steganographyV2.js`) may actually be used per embed. V1 dilutes touch
+  density by inflating its own generated carrier; V2 frequently gets a
+  user-supplied carrier it can't resize, so the margin here is a cap
+  enforced at embed time instead. The UI's capacity meter and payload-size
+  hint both show this margin-adjusted "safe usable capacity" figure
+  alongside the raw tier-map total, so the number a user sees before
+  encoding matches what will actually be accepted.
+- **A 512px minimum carrier side** (`MIN_SIDE` in `js/steganographyV2.js`) —
+  smaller carriers starve the chi-square test's histogram bins regardless of
+  what's embedded (confirmed with completely unembedded carriers: some
+  channel spuriously read over the cutoff on carriers as large as 480px in
+  testing). This is a higher floor than V1's 320px: V1's floor was verified
+  against carriers it generates itself, which have more locally-varied
+  texture than an arbitrary user upload can be assumed to have, and 512px
+  (matching this app's own procedural default) is the smallest size that
+  tested reliably clean against a low-texture synthetic carrier meant to
+  stand in for a worst-case upload.
+
+**Re-verified after the fix**, same methodology (verbatim detector chi-square
+code, both the Node-only stress harness and the real Adaptive Encoder in a
+real browser): across every non-rejected scenario in the stress harness —
+spanning the 512px floor exactly, aggressive and loose threshold settings,
+carriers up to 1024px, and payloads filled to 90% of the safe cap — the blue
+channel (the only channel ever written) read 0.0% in every single run.
+Red/Green/Grayscale occasionally still read above the cutoff (up to 38% on
+green at 1024px in one run), but the same noise shows up on those channels in
+carriers with nothing embedded at all — it's the detector's own baseline
+false-positive rate on channels this scheme never touches, not a signal this
+app produces. Separately, 15 trials through the real Adaptive Encoder UI at
+default settings (512x512 procedural carrier, 50-8000 character payloads)
+came back 0.0% on all four channels, with no regression to normal encode/
+decode/wrong-password behavior.
 
 ## Project layout
 

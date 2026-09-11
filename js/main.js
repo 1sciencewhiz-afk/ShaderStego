@@ -377,6 +377,7 @@ const adaptiveHighThresholdValue = document.getElementById('adaptive-high-thresh
 const adaptiveCapacityMeter = document.getElementById('adaptive-capacity-meter');
 const adaptiveTierCountsEl = document.getElementById('adaptive-tier-counts');
 const adaptiveCapacityBitsEl = document.getElementById('adaptive-capacity-bits');
+const adaptiveSafeCapacityBitsEl = document.getElementById('adaptive-safe-capacity-bits');
 const adaptiveSequentialBitsEl = document.getElementById('adaptive-sequential-bits');
 const adaptiveVisualizer = document.getElementById('adaptive-visualizer');
 const adaptiveEncodeText = document.getElementById('adaptive-encode-text');
@@ -407,7 +408,7 @@ function updateAdaptivePayloadCapacityHint() {
   // the real check at embed time uses the exact packed+compressed+encrypted
   // ciphertext length.
   const neededBits = (approxBytes + 80) * 8;
-  const available = adaptiveAnalysis.capacityBits;
+  const available = adaptiveAnalysis.safeCapacityBits;
   const tooBig = neededBits > available;
 
   adaptiveEncodeCapacityHint.textContent = tooBig
@@ -466,10 +467,12 @@ function recomputeAdaptiveAnalysis() {
 
   adaptiveAnalysis = buildAnalysis(adaptiveScored, lowPercentile, highPercentile);
 
-  const { width, height, tiers, reservedPixelCount, tierCounts, capacityBits, sequentialCapacityBits } = adaptiveAnalysis;
+  const { width, height, tiers, reservedPixelCount, tierCounts, capacityBits, safeCapacityBits, sequentialCapacityBits } =
+    adaptiveAnalysis;
 
   adaptiveTierCountsEl.textContent = `${tierCounts[0]} / ${tierCounts[1]} / ${tierCounts[2]}`;
   adaptiveCapacityBitsEl.textContent = formatBits(capacityBits);
+  adaptiveSafeCapacityBitsEl.textContent = formatBits(safeCapacityBits);
   adaptiveSequentialBitsEl.textContent = formatBits(sequentialCapacityBits);
   adaptiveCapacityMeter.classList.remove('hidden');
 

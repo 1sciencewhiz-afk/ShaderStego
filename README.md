@@ -32,24 +32,26 @@ uploaded.
    verifies or it doesn't, so "wrong passphrase" and "not a stego image at
    all" are indistinguishable to anyone without the passphrase.
 4. **Hide** — A WebGL2 fragment shader renders a procedural Voronoi/fractal
-   image sized to have enough pixels to carry the packet. Only the small
-   fixed header (length, salt, IV) is written sequentially, starting at
-   pixel 0 — it has to be, since finding it is how the decoder learns the
-   salt needed to derive anything else. The ciphertext itself is scattered
-   across the *entire remaining canvas*, in an order set by a Fisher-Yates
-   shuffle seeded from the passphrase and salt (the same mechanism the
-   Adaptive mode uses — see below). Embedding the whole payload
-   sequentially from pixel 0, as earlier versions did, leaves a spatially
-   contiguous block of touched pixels that a windowed/progressive scanner
-   can localize regardless of how individual bits were written; scattering
-   spreads it across the whole image instead. Every written bit — header
-   and ciphertext alike — uses LSB matching (±1 embedding, see "Adaptive
-   mode" below for why) rather than direct bit replacement. The alpha
-   channel is left untouched at 255, since browsers premultiply RGB by
-   alpha when compositing a drawn image — flipping alpha's LSB would
-   silently rescale the RGB channels on redraw and corrupt the hidden bits.
-   The Encoder shows a live capacity hint and rejects payloads that would
-   need an impractically large carrier (past 4096x4096px).
+   image sized to have enough pixels to carry the packet — with real slack
+   built in (see "Capacity margin vs. detectability" below), not just a
+   tight fit. Only the small fixed header (length, salt, IV) is written
+   sequentially, starting at pixel 0 — it has to be, since finding it is
+   how the decoder learns the salt needed to derive anything else. The
+   ciphertext itself is scattered across the *entire remaining canvas*, in
+   an order set by a Fisher-Yates shuffle seeded from the passphrase and
+   salt (the same mechanism the Adaptive mode uses — see below). Embedding
+   the whole payload sequentially from pixel 0, as earlier versions did,
+   leaves a spatially contiguous block of touched pixels that a
+   windowed/progressive scanner can localize regardless of how individual
+   bits were written; scattering spreads it across the whole image instead.
+   Every written bit — header and ciphertext alike — uses LSB matching
+   (±1 embedding, see "Adaptive mode" below for why) rather than direct bit
+   replacement. The alpha channel is left untouched at 255, since browsers
+   premultiply RGB by alpha when compositing a drawn image — flipping
+   alpha's LSB would silently rescale the RGB channels on redraw and
+   corrupt the hidden bits. The Encoder shows a live capacity hint and
+   rejects payloads that would need an impractically large carrier
+   (past 4096x4096px).
 5. **Export** — The result is exported as a lossless PNG (JPEG would destroy
    the hidden bits through lossy compression).
 6. **Decode** — Uploading the PNG re-reads its raw pixel buffer via
@@ -61,6 +63,48 @@ uploaded.
    as text; otherwise it's wrapped in a `Blob` with the original MIME type,
    handed an object URL, and offered as a "Download Extracted File" button
    that preserves the original name and extension.
+
+## Capacity margin vs. detectability
+
+`js/steganography.js`'s `computeCanvasDimensions` sizes the carrier at 8x
+the pixel capacity the payload strictly needs (`CAPACITY_MARGIN = 8`, ~12.5%
+touch density) with a 320px minimum side, not a tight fit. This came from
+reading a specific detector's exact chi-square implementation (Westfeld
+pairs-of-values: `Σ (n₂ₖ − n₂ₖ₊₁)² / (n₂ₖ + n₂ₖ₊₁)` over cumulative
+progressive slices of the image) and working through it by hand: LSB
+matching alone reduces but doesn't zero out each pair's count imbalance —
+a mismatched pixel moves to *either* neighboring value with equal
+probability, so roughly a quarter of a pair's "wrong-parity" population
+leaks into the adjacent pair rather than resolving within the same one,
+leaving each pair's natural imbalance at roughly 25% of a clean image's
+once every available slot is touched. Diluting the touched fraction of the
+image pushes that residual down further.
+
+That margin alone (8x, no size floor) wasn't sufficient by itself: testing
+against a verbatim reproduction of the detector's own chi-square code found
+that *small* carriers (under roughly 200px per side) gave the test too few
+samples per histogram bin to be stable, producing spuriously high readings
+on some channel even for an *unembedded* carrier of the same size — a
+statistical artifact of the test itself at that scale, not something the
+embedding introduced. A 320px floor keeps every carrier comfortably past
+where that instability showed up.
+
+**This has been empirically verified**, using a verbatim port of the
+detector's `lngamma`/`gammaCDF`/`chiSquarePValue`/pairs-of-values code
+(the pieces that actually decide its "Prob" badge and
+CLEAN/SUSPICIOUS/HIGH verdict, both driven only by the final —
+100%-of-image — value, not the max across the progressive chart) run
+against real images produced by this app's own Encoder in a real browser.
+Across 80 trials spanning payloads from 39 to 11,614 characters at the
+current margin and floor, the worst final probability seen on any of the
+detector's four channel options (Red/Green/Blue/Grayscale) was 1.4%, all
+far under its 35% "suspicious" cutoff. Before the 320px floor was added,
+15 trials biased toward small payloads (200–1700 characters) produced one
+result over the cutoff (41.9%) and, at even smaller sizes still hitting the
+old 64px floor, results as high as 92.3% on a single channel — this is
+what the floor fixes. This is evidence against one specific detector's
+algorithm on the payload sizes tested, not a universal guarantee against
+every possible steganalysis technique or payload size.
 
 ## Hiding a file instead of text
 
@@ -136,6 +180,17 @@ statistically hardest to fingerprint.
   for 0 bits) on the carrier; the Capacity Meter shows the 0/1/2-bit pixel
   counts and total adaptive capacity against a plain sequential-LSB
   reference.
+
+Because red and green are never touched at all, a per-channel pairs-of-values
+chi-square test reading either channel should see nothing. Reading blue (or
+a grayscale value derived from it) is a different story: unlike V1, nothing
+here enforces a capacity margin — the touch density on blue is whatever the
+variance thresholds and payload size happen to produce, and could run high
+for a large payload on a small or mostly-smooth carrier. This wasn't
+separately reasoned through or checked against a chi-square test the way
+V1's margin above was (see that section's caveat on verification, too) — a
+larger, more textured carrier and a higher smooth-region cutoff give more
+pixels for the payload to spread across if this matters for a given use.
 
 ## Project layout
 

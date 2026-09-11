@@ -74,13 +74,40 @@ function randomBool() {
   return Math.random() < 0.5;
 }
 
+// Even with LSB matching, touching *every* available channel slot still
+// leaves a measurable Westfeld pairs-of-values chi-square signal: a
+// mismatched pixel moves to either neighboring value with equal
+// probability, so roughly a quarter of a pair's "wrong-parity" population
+// leaks into the *adjacent* pair rather than staying put — under full
+// touch density this shrinks each pair's natural (n_2k - n_2k+1) count
+// difference to about 25% of a clean image's, not to zero, but still
+// squarely inside detectable territory once it feeds back into the
+// difference-squared chi-square statistic. Sizing the carrier with real
+// slack — so most of any progressive window is genuinely untouched —
+// dilutes that residual far below it: touching only ~1/CAPACITY_MARGIN of
+// available slots means roughly that same fraction of the aggregate
+// histogram carries any artifact at all, the rest being pristine original
+// data. CAPACITY_MARGIN=8 targets ~12.5% touch density, a comfortable
+// margin under the ~20% ceiling a back-of-envelope pairs-of-values
+// analysis suggests keeps most of a natural image's pair inequality intact.
+const CAPACITY_MARGIN = 8;
+
+// Below roughly this many pixels per side, a progressive chi-square scan
+// gets too few samples per histogram bin to be a stable statistic —
+// verified against a real detector's own algorithm: an *unembedded*
+// carrier this small could already read as suspicious on some channel
+// purely from that sampling noise, regardless of anything we embed.
+const MIN_SIDE = 320;
+
 /**
  * Choose carrier canvas dimensions large enough to hold `byteLength` bytes
- * (header + ciphertext combined), one bit per usable (R/G/B) channel byte.
+ * (header + ciphertext combined) at a low touch density (see
+ * CAPACITY_MARGIN above) and past MIN_SIDE — one bit per usable (R/G/B)
+ * channel byte.
  */
-export function computeCanvasDimensions(byteLength, minSide = 64) {
+export function computeCanvasDimensions(byteLength, minSide = MIN_SIDE) {
   const bitsNeeded = byteLength * 8;
-  const pixelsNeeded = Math.ceil(bitsNeeded / CHANNELS_PER_PIXEL);
+  const pixelsNeeded = Math.ceil((bitsNeeded / CHANNELS_PER_PIXEL) * CAPACITY_MARGIN);
   const side = Math.max(minSide, Math.ceil(Math.sqrt(pixelsNeeded)));
   const width = side;
   const height = Math.max(minSide, Math.ceil(pixelsNeeded / width));

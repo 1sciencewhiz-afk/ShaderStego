@@ -1,6 +1,8 @@
 // Procedural WebGL2 fragment shader (Voronoi fracture + Julia fractal glow)
 // used to generate the visual carrier image that masks the hidden data.
 
+import { worstChannelPValue } from './carrierSelfCheck.js';
+
 const VERTEX_SHADER_SOURCE = `#version 300 es
 in vec2 aPosition;
 void main() {
@@ -95,13 +97,7 @@ function createProgram(gl, vertexSource, fragmentSource) {
   return program;
 }
 
-/**
- * Render the procedural shader at `width` x `height` and return a 2D canvas
- * containing the result. Using a 2D canvas (rather than the WebGL canvas
- * directly) gives predictable top-down pixel ordering for the LSB embedding
- * and PNG export steps.
- */
-export function renderShaderCanvas(width, height) {
+function renderOnce(width, height) {
   const glCanvas = document.createElement('canvas');
   glCanvas.width = width;
   glCanvas.height = height;
@@ -139,4 +135,49 @@ export function renderShaderCanvas(width, height) {
   ctx2d.drawImage(glCanvas, 0, 0);
 
   return canvas2d;
+}
+
+// How many times to re-render (with a fresh random Voronoi seed) if a
+// carrier's raw pixel statistics read as chi-square-suspicious before any
+// embedding happens. 0.2 sits comfortably under a real scanner's 0.35
+// "suspicious" cutoff, leaving margin for the embedding itself to add a
+// little more (V1/V2 both already keep that residual small — see README).
+const SELF_CHECK_MAX_ATTEMPTS = 20;
+const SELF_CHECK_P_THRESHOLD = 0.2;
+
+/**
+ * Render the procedural shader at `width` x `height` and return a 2D canvas
+ * containing the result. Using a 2D canvas (rather than the WebGL canvas
+ * directly) gives predictable top-down pixel ordering for the LSB embedding
+ * and PNG export steps.
+ *
+ * Before returning, the raw (unembedded) output is checked against the same
+ * chi-square statistic a steganalysis scanner would compute (see
+ * carrierSelfCheck.js) — some carrier dimensions produce visible histogram
+ * banding purely from quantizing the shader's smooth gradient, independent
+ * of anything embedded later. Since each render uses a fresh random seed,
+ * a failing carrier is simply re-rendered; the best of the attempts is used
+ * even if every one of them happens to fail the threshold, so this never
+ * blocks the caller.
+ */
+export function renderShaderCanvas(width, height) {
+  let best = null;
+  let bestP = Infinity;
+
+  for (let attempt = 0; attempt < SELF_CHECK_MAX_ATTEMPTS; attempt++) {
+    const canvas2d = renderOnce(width, height);
+    const ctx2d = canvas2d.getContext('2d');
+    const imageData = ctx2d.getImageData(0, 0, width, height);
+    const p = worstChannelPValue(imageData);
+
+    if (p < bestP) {
+      best = canvas2d;
+      bestP = p;
+    }
+    if (p <= SELF_CHECK_P_THRESHOLD) {
+      return canvas2d;
+    }
+  }
+
+  return best;
 }

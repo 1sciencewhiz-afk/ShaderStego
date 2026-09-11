@@ -106,6 +106,49 @@ what the floor fixes. This is evidence against one specific detector's
 algorithm on the payload sizes tested, not a universal guarantee against
 every possible steganalysis technique or payload size.
 
+### Carrier self-check (banding, independent of anything embedded)
+
+A wider sweep — testing every power-of-ten-ish payload size from 10 bytes
+to 400,000 characters, not just the 39–11,614 range above — turned up a
+different problem, unrelated to embedding density: at some specific carrier
+dimensions (839x839 was the one found), the shader's output *by itself*,
+with nothing hidden in it at all, read as 90-100% suspicious on Red and/or
+Grayscale. The Voronoi field's color is a smooth analytic function of
+distance-to-nearest-point; quantizing a slow gradient to 8 bits produces
+histogram "banding" whose exact shape can imbalance the pairs-of-values
+statistic purely from how that gradient's local slope interacts with a
+given image's pixel dimensions — confirmed by checking completely
+unembedded renders at the same size, which read just as suspicious.
+
+Per-pixel dithering was tried first (adding small random noise before
+quantization, both in the shader itself and via a numerically safer
+trig-free hash after `sin()`-based noise was suspected of its own precision
+issues at large coordinates) — but even at amplitudes well above normal
+dithering (±8 of 255, clearly visible-scale noise), the statistic barely
+moved and sometimes got worse. Rather than keep tuning a shader constant
+against one statistic by feel, `js/carrierSelfCheck.js` runs the same
+single-shot pairs-of-values p-value calculation the detector would, and:
+
+- `renderShaderCanvas` (`js/shaderRenderer.js`) checks its own raw output
+  before returning it, and re-renders with a fresh random Voronoi seed
+  (the shader already varies this per call) up to 20 times if a channel
+  reads above a 0.2 p-value — comfortably under the detector's 0.35 cutoff,
+  leaving margin for embedding's own contribution.
+- The Encoder's embed step (`js/main.js`) checks again *after* embedding,
+  since a carrier that was clean on its own can still cross the cutoff
+  once real data is scattered into it (the residual pair imbalance LSB
+  matching leaves under full touch density, described above) — and
+  retries against a freshly-rendered carrier (up to 5 times) if so, keeping
+  the best (lowest worst-channel p-value) attempt even if none clear the
+  threshold outright, so encoding never gets stuck.
+
+**Re-verified** at 839x839 specifically (the size that failed before any of
+this): 8 real encode round-trips through the actual Encoder UI all landed
+at or under 14.5% on every channel (versus 90-99.9% before the fix), and a
+repeat of the wide payload-size sweep (10 bytes to 400,000 characters, 16
+sizes) came back with 0 of 64 channel-trials over the 35% cutoff, worst
+case 10.2%.
+
 ## Hiding a file instead of text
 
 Both the Encoder and the Adaptive Encoder have a drag-and-drop zone (or

@@ -2,6 +2,7 @@ import { encryptBytes, decryptBytes } from './crypto.js';
 import { packPayload, unpackPayload } from './filePacking.js';
 import { HEADER_SIZE, computeCanvasDimensions, embedPacket, extractPacket } from './steganography.js';
 import { renderShaderCanvas } from './shaderRenderer.js';
+import { worstChannelPValue } from './carrierSelfCheck.js';
 import { renderTierOverlay } from './complexity.js';
 import { scoreCarrier, buildAnalysis, embedAdaptive, extractAdaptive } from './steganographyV2.js';
 
@@ -19,6 +20,9 @@ function debounce(fn, delayMs) {
 // would need a bigger carrier are rejected with a clear error instead of
 // hanging the tab.
 const MAX_CANVAS_DIMENSION = 4096;
+// See the carrier-generation retry loop in the encode handler below.
+const POST_EMBED_MAX_ATTEMPTS = 5;
+const POST_EMBED_P_THRESHOLD = 0.2;
 
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
@@ -244,14 +248,36 @@ encodeButton.addEventListener('click', async () => {
       );
     }
 
-    setStatus(encodeStatus, 'Generating carrier image...', 'info');
-    const canvas = renderShaderCanvas(width, height);
-    const ctx = canvas.getContext('2d');
+    // renderShaderCanvas already self-checks the *raw* carrier's chi-square
+    // statistics before returning it, but embedding adds its own residual
+    // signal on top (see README: LSB matching under full touch density
+    // leaves ~25% of a pair's natural imbalance) — a carrier that was
+    // comfortably clean on its own can still cross the detector's 35%
+    // cutoff once real data is scattered into it. So the *embedded* result
+    // is checked too, and — since each render draws a fresh random Voronoi
+    // pattern — a bad outcome is simply retried against a new carrier
+    // rather than shipped as-is.
+    let bestCanvas = null, bestImageData = null, bestP = Infinity;
+    for (let attempt = 0; attempt < POST_EMBED_MAX_ATTEMPTS; attempt++) {
+      setStatus(encodeStatus, 'Generating carrier image...', 'info');
+      const attemptCanvas = renderShaderCanvas(width, height);
+      const attemptCtx = attemptCanvas.getContext('2d');
+      const attemptImageData = attemptCtx.getImageData(0, 0, width, height);
 
-    const imageData = ctx.getImageData(0, 0, width, height);
-    setStatus(encodeStatus, 'Scattering payload across the carrier...', 'info');
-    await embedPacket(imageData, salt, iv, ciphertext, password);
-    ctx.putImageData(imageData, 0, 0);
+      setStatus(encodeStatus, 'Scattering payload across the carrier...', 'info');
+      await embedPacket(attemptImageData, salt, iv, ciphertext, password);
+
+      const p = worstChannelPValue(attemptImageData);
+      if (p < bestP) {
+        bestP = p;
+        bestCanvas = attemptCanvas;
+        bestImageData = attemptImageData;
+      }
+      if (p <= POST_EMBED_P_THRESHOLD) break;
+    }
+    const canvas = bestCanvas;
+    const ctx = canvas.getContext('2d');
+    ctx.putImageData(bestImageData, 0, 0);
 
     encodePreview.src = canvas.toDataURL('image/png');
     encodePreview.classList.remove('hidden');
